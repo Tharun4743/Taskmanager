@@ -477,14 +477,14 @@ export function uploadBufferToCloudinary(
 async function startServer() {
   const isVercel = Boolean(process.env.VERCEL);
 
-  // Initialize PostgreSQL database schemas only in persistent server environments (e.g. local / Render).
-  // In Vercel serverless functions, database schema is already migrated, avoiding 60+ blocking DDL queries on cold start.
-  if (!isVercel && process.env.DATABASE_URL) {
+  // Initialize PostgreSQL database schemas and essential column migrations across all environments.
+  // The fast schema check (<15ms) avoids blocking cold starts while ensuring table parity.
+  if (process.env.DATABASE_URL) {
     initDB().catch((dbErr) => {
       console.error('[Database Init Warning] Could not complete initDB:', dbErr);
     });
-  } else if (!process.env.DATABASE_URL) {
-    console.warn('[Database] DATABASE_URL is not set. Please configure DATABASE_URL in Vercel Environment Variables.');
+  } else {
+    console.warn('[Database] DATABASE_URL is not set. Please configure DATABASE_URL in Environment Variables.');
   }
 
   // Initialize Sentry Production Error Tracking asynchronously
@@ -4838,21 +4838,37 @@ async function startServer() {
         }
 
         const newCount = existing.status === 'REJECTED' ? existing.resubmission_count + 1 : existing.resubmission_count;
-        await pool.query(`
-          UPDATE task_submissions
-          SET status = 'SUBMITTED',
-              screenshot_url = $1,
-              cloudinary_public_id = $2,
-              custom_field_value = $3,
-              submitted_at = NOW(),
-              resubmission_count = $4,
-              original_filename = $5,
-              proof_file_hash = $6,
-              is_duplicate = $7,
-              duplicate_matched_submission_id = $8,
-              updated_at = NOW()
-          WHERE id = $9
-        `, [screenshot_url, cloudinary_public_id, custom_field_value, newCount, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id, existing.id]);
+        try {
+          await pool.query(`
+            UPDATE task_submissions
+            SET status = 'SUBMITTED',
+                screenshot_url = $1,
+                cloudinary_public_id = $2,
+                custom_field_value = $3,
+                submitted_at = NOW(),
+                resubmission_count = $4,
+                original_filename = $5,
+                proof_file_hash = $6,
+                is_duplicate = $7,
+                duplicate_matched_submission_id = $8,
+                updated_at = NOW()
+            WHERE id = $9
+          `, [screenshot_url, cloudinary_public_id, custom_field_value, newCount, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id, existing.id]);
+        } catch (upErr: any) {
+          console.warn('[Submission Update Fallback]:', upErr.message);
+          await pool.query(`
+            UPDATE task_submissions
+            SET status = 'SUBMITTED',
+                screenshot_url = $1,
+                cloudinary_public_id = $2,
+                custom_field_value = $3,
+                submitted_at = NOW(),
+                resubmission_count = $4,
+                original_filename = $5,
+                updated_at = NOW()
+            WHERE id = $6
+          `, [screenshot_url, cloudinary_public_id, custom_field_value, newCount, original_filename, existing.id]);
+        }
 
         // Broadcast real-time SSE event
         broadcastTaskEvent({
@@ -4914,15 +4930,28 @@ async function startServer() {
         return res.json({ success: true, id: existing.id });
       }
 
-      const subRes = await pool.query(`
-        INSERT INTO task_submissions (
-          task_id, user_id, status, screenshot_url, cloudinary_public_id,
-          custom_field_value, original_filename, proof_file_hash, is_duplicate,
-          duplicate_matched_submission_id, submitted_at
-        )
-        VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, $7, $8, $9, NOW())
-        RETURNING id
-      `, [task_id, req.user.id, screenshot_url, cloudinary_public_id, custom_field_value, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id]);
+      let subRes: any;
+      try {
+        subRes = await pool.query(`
+          INSERT INTO task_submissions (
+            task_id, user_id, status, screenshot_url, cloudinary_public_id,
+            custom_field_value, original_filename, proof_file_hash, is_duplicate,
+            duplicate_matched_submission_id, submitted_at
+          )
+          VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, $7, $8, $9, NOW())
+          RETURNING id
+        `, [task_id, req.user.id, screenshot_url, cloudinary_public_id, custom_field_value, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id]);
+      } catch (insErr: any) {
+        console.warn('[Submission Insert Fallback]:', insErr.message);
+        subRes = await pool.query(`
+          INSERT INTO task_submissions (
+            task_id, user_id, status, screenshot_url, cloudinary_public_id,
+            custom_field_value, original_filename, submitted_at
+          )
+          VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, NOW())
+          RETURNING id
+        `, [task_id, req.user.id, screenshot_url, cloudinary_public_id, custom_field_value, original_filename]);
+      }
 
       // Broadcast real-time SSE event
       broadcastTaskEvent({

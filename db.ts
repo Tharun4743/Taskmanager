@@ -97,20 +97,23 @@ export async function initDB(forceMigration: boolean = false) {
         `);
         const count = parseInt(checkRes.rows[0]?.table_count || '0', 10);
         if (count >= 5) {
-          console.log(`[initDB] Schema verified (${count} core tables active). Skipping 197 redundant DDL roundtrips for instant startup.`);
+          console.log(`[initDB] Schema verified (${count} core tables active). Skipping redundant DDL roundtrips for instant startup.`);
           // Ensure essential recent column migrations exist even on fast path
-          try {
-            await client.query(`
-              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS verified_by_id UUID REFERENCES users(id) ON DELETE SET NULL;
-              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS proof_file_hash VARCHAR(64);
-              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT FALSE;
-              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL;
-              CREATE INDEX IF NOT EXISTS idx_task_submissions_verified_by ON task_submissions(verified_by_id);
-              CREATE INDEX IF NOT EXISTS idx_task_submissions_hash ON task_submissions(proof_file_hash);
-              ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS is_public_portfolio BOOLEAN DEFAULT TRUE;
-            `);
-          } catch (colErr: any) {
-            console.warn('[initDB] Fast column migration warning:', colErr?.message || colErr);
+          const fastMigrations = [
+            `ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS verified_by_id UUID REFERENCES users(id) ON DELETE SET NULL;`,
+            `ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS proof_file_hash VARCHAR(64);`,
+            `ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT FALSE;`,
+            `ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL;`,
+            `CREATE INDEX IF NOT EXISTS idx_task_submissions_verified_by ON task_submissions(verified_by_id);`,
+            `CREATE INDEX IF NOT EXISTS idx_task_submissions_hash ON task_submissions(proof_file_hash);`,
+            `ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS is_public_portfolio BOOLEAN DEFAULT TRUE;`
+          ];
+          for (const mig of fastMigrations) {
+            try {
+              await client.query(mig);
+            } catch (mErr: any) {
+              console.warn('[initDB] Fast migration step:', mErr?.message);
+            }
           }
           return;
         }
