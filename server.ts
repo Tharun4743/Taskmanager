@@ -6092,7 +6092,7 @@ async function startServer() {
         personalRes, skillsRes, projectsRes, internshipsRes, certsRes,
         codingRes, achieveRes, langRes
       ] = await Promise.all([
-        client.query('SELECT semester, cgpa, about_me, is_public_portfolio FROM student_profiles WHERE user_id = $1', [userId]),
+        client.query('SELECT * FROM student_profiles WHERE user_id = $1', [userId]),
         client.query('SELECT skill_name, proficiency, category FROM student_skills WHERE user_id = $1 ORDER BY proficiency DESC, created_at DESC', [userId]),
         client.query('SELECT project_title, tech_stack, project_url, github_url, description FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
         client.query('SELECT company_name, role_title, duration, description FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
@@ -6139,6 +6139,9 @@ async function startServer() {
   // Student toggle for public portfolio visibility
   app.patch('/api/student/profile/public-portfolio', authenticate, authorize(['STUDENT']), asyncHandler(async (req: any, res: Response) => {
     const isPublic = Boolean(req.body.is_public);
+    try {
+      await pool.query(`ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS is_public_portfolio BOOLEAN DEFAULT TRUE;`);
+    } catch (_) {}
     await pool.query(`
       INSERT INTO student_profiles (user_id, is_public_portfolio, updated_at)
       VALUES ($1, $2, NOW())

@@ -102,7 +102,12 @@ export async function initDB(forceMigration: boolean = false) {
           try {
             await client.query(`
               ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS verified_by_id UUID REFERENCES users(id) ON DELETE SET NULL;
+              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS proof_file_hash VARCHAR(64);
+              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT FALSE;
+              ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL;
               CREATE INDEX IF NOT EXISTS idx_task_submissions_verified_by ON task_submissions(verified_by_id);
+              CREATE INDEX IF NOT EXISTS idx_task_submissions_hash ON task_submissions(proof_file_hash);
+              ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS is_public_portfolio BOOLEAN DEFAULT TRUE;
             `);
           } catch (colErr: any) {
             console.warn('[initDB] Fast column migration warning:', colErr?.message || colErr);
