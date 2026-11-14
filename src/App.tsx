@@ -10562,25 +10562,27 @@ export default function App() {
   // Public Student Portfolio View (Accessible with or without login via /p/:regno or ?portfolio=:regno)
   if (view === 'public-portfolio' && publicPortfolioRegNo) {
     return (
-      <Suspense
-        fallback={
-          <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center text-zinc-400 p-6">
-            <div className="w-10 h-10 border-3 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-3" />
-            <p className="text-xs font-mono tracking-wide">Loading Verified Student Portfolio...</p>
-          </div>
-        }
-      >
-        <PublicStudentPortfolioView
-          regNo={publicPortfolioRegNo}
-          onBackToApp={() => {
-            setPublicPortfolioRegNo(null);
-            setView('dashboard');
-            if (typeof window !== 'undefined') {
-              window.history.pushState(null, '', '/');
-            }
-          }}
-        />
-      </Suspense>
+      <div className="w-full h-full min-h-screen bg-slate-50 dark:bg-zinc-950">
+        <Suspense
+          fallback={
+            <div className="min-h-screen bg-slate-50 dark:bg-zinc-950 flex flex-col items-center justify-center text-zinc-600 dark:text-zinc-400 p-6">
+              <div className="w-10 h-10 border-3 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-3" />
+              <p className="text-xs font-mono tracking-wide">Loading Verified Student Portfolio...</p>
+            </div>
+          }
+        >
+          <PublicStudentPortfolioView
+            regNo={publicPortfolioRegNo}
+            onBackToApp={() => {
+              setPublicPortfolioRegNo(null);
+              setView('dashboard');
+              if (typeof window !== 'undefined') {
+                window.history.pushState(null, '', '/');
+              }
+            }}
+          />
+        </Suspense>
+      </div>
     );
   }
 

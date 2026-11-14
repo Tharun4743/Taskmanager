@@ -14,6 +14,7 @@ import fs from 'fs';
 import express, { Request, Response, NextFunction } from 'express';
 import compression from 'compression';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -443,6 +444,30 @@ const memoryUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
 });
+
+export function uploadBufferToCloudinary(
+  buffer: Buffer,
+  folder = 'academic-task-uploads',
+  originalFilename?: string
+): Promise<{ secure_url: string; public_id: string }> {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: 'auto',
+      },
+      (error: any, result: any) => {
+        if (error) return reject(error);
+        if (!result) return reject(new Error('Cloudinary upload returned empty response'));
+        resolve({
+          secure_url: result.secure_url,
+          public_id: result.public_id,
+        });
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}
 
 // ─── Express App ──────────────────────────────────────────────────────────────
 async function startServer() {
@@ -4480,13 +4505,16 @@ async function startServer() {
              u.class_id, u.department_id,
              c.name as class_name, c.year as class_year,
              d.name as department_name,
-             vr.full_name as verified_by_name, vr.username as verified_by_username, vr.role as verified_by_role
+             vr.full_name as verified_by_name, vr.username as verified_by_username, vr.role as verified_by_role,
+             dup_u.full_name as dup_student_name, dup_u.register_number as dup_register_number, dup_ts.submitted_at as dup_submitted_at
       FROM task_submissions ts
       JOIN tasks t ON ts.task_id = t.id
       JOIN users u ON ts.user_id = u.id
       LEFT JOIN classes c ON u.class_id = c.id
       LEFT JOIN departments d ON u.department_id = d.id
       LEFT JOIN users vr ON ts.verified_by_id = vr.id
+      LEFT JOIN task_submissions dup_ts ON ts.duplicate_matched_submission_id = dup_ts.id
+      LEFT JOIN users dup_u ON dup_ts.user_id = dup_u.id
     `;
 
     try {
@@ -4523,12 +4551,15 @@ async function startServer() {
                    u.class_id, u.department_id,
                    c.name as class_name, c.year as class_year,
                    d.name as department_name,
-                   NULL as verified_by_name, NULL as verified_by_username, NULL as verified_by_role
+                   NULL as verified_by_name, NULL as verified_by_username, NULL as verified_by_role,
+                   dup_u.full_name as dup_student_name, dup_u.register_number as dup_register_number, dup_ts.submitted_at as dup_submitted_at
             FROM task_submissions ts
             JOIN tasks t ON ts.task_id = t.id
             JOIN users u ON ts.user_id = u.id
             LEFT JOIN classes c ON u.class_id = c.id
             LEFT JOIN departments d ON u.department_id = d.id
+            LEFT JOIN task_submissions dup_ts ON ts.duplicate_matched_submission_id = dup_ts.id
+            LEFT JOIN users dup_u ON dup_ts.user_id = dup_u.id
           `;
           if (dbUser.role === 'STUDENT') {
             if (dbUser.is_coordinator && dbUser.class_id) {
@@ -4585,6 +4616,17 @@ async function startServer() {
       verified_by_name: s.verified_by_name || null,
       verified_by_username: s.verified_by_username || null,
       verified_by_role: s.verified_by_role || null,
+      proof_file_hash: s.proof_file_hash || null,
+      is_duplicate: Boolean(s.is_duplicate),
+      duplicate_matched_submission_id: s.duplicate_matched_submission_id || null,
+      duplicate_match_name: s.dup_student_name || null,
+      duplicate_match_regno: s.dup_register_number || null,
+      duplicate_match_submitted_at: s.dup_submitted_at || null,
+      duplicate_match: s.dup_student_name ? {
+        student_name: s.dup_student_name,
+        register_number: s.dup_register_number,
+        submitted_at: s.dup_submitted_at,
+      } : null,
     }));
   }
 
@@ -4688,7 +4730,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/submissions', authenticate, authorize(['STUDENT']), upload.single('screenshot'), async (req: any, res) => {
+  app.post('/api/submissions', authenticate, authorize(['STUDENT']), memoryUpload.single('screenshot'), async (req: any, res) => {
     try {
       submissionSchemaValidator.parse(req.body);
     } catch (e: any) {
@@ -4702,26 +4744,20 @@ async function startServer() {
       return res.status(400).json({ error: errorMessage });
     }
     const { task_id, custom_field_value } = req.body;
-    const screenshot_url = req.file?.path || null; // Cloudinary URL
-    const cloudinary_public_id = req.file?.filename || null; // Cloudinary Public ID
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'Screenshot is required' });
+    }
     const original_filename = (req.file?.originalname || req.body?.original_filename || '').trim() || null;
-
-    if (!screenshot_url) return res.status(400).json({ error: 'Screenshot is required' });
+    let cloudinary_public_id: string | null = null;
 
     try {
       const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [task_id]);
       const task = taskRes.rows[0];
       if (!task) {
-        if (cloudinary_public_id) {
-          try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-        }
         return res.status(404).json({ error: 'Task not found' });
       }
 
       if (task.submission_type === 'TEAM') {
-        if (cloudinary_public_id) {
-          try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-        }
         return res.status(400).json({ error: 'This task is configured for Team submission. Please submit proof via your team.' });
       }
 
@@ -4738,15 +4774,9 @@ async function startServer() {
       `, [task.id, req.user.department_id, req.user.class_id]);
 
       if (accessibilityRes.rowCount === 0) {
-        if (cloudinary_public_id) {
-          try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-        }
         return res.status(403).json({ error: 'Forbidden: You do not have access to this task.' });
       }
       if (task.deadline && new Date() > new Date(task.deadline)) {
-        if (cloudinary_public_id) {
-          try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-        }
         return res.status(400).json({ error: 'Hard deadline block — no late uploads possible' });
       }
 
@@ -4755,18 +4785,43 @@ async function startServer() {
 
       if (existing) {
         if (existing.status === 'VERIFIED') {
-          if (cloudinary_public_id) {
-            try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-          }
           return res.status(400).json({ error: 'Already verified' });
         }
         if (existing.status === 'REJECTED' && existing.resubmission_count >= 2) {
-          if (cloudinary_public_id) {
-            try { await cloudinary.uploader.destroy(cloudinary_public_id); } catch (e) { }
-          }
           return res.status(400).json({ error: 'Maximum 2 resubmissions allowed. Submission locked.' });
         }
+      }
 
+      // Compute SHA-256 hash of proof file buffer
+      const proof_file_hash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+
+      // Duplicate detection: check if another student has submitted an identical proof file for this task
+      const dupCheckRes = await pool.query(`
+        SELECT ts.id, ts.submitted_at, u.full_name, u.register_number
+        FROM task_submissions ts
+        JOIN users u ON ts.user_id = u.id
+        WHERE ts.proof_file_hash = $1
+          AND ts.task_id = $2
+          AND ts.user_id != $3
+        ORDER BY ts.submitted_at ASC
+        LIMIT 1
+      `, [proof_file_hash, task_id, req.user.id]);
+
+      const is_duplicate = dupCheckRes.rows.length > 0;
+      const duplicate_matched_submission_id = is_duplicate ? dupCheckRes.rows[0].id : null;
+
+      // Upload buffer to Cloudinary
+      let uploadResult: { secure_url: string; public_id: string };
+      try {
+        uploadResult = await uploadBufferToCloudinary(req.file.buffer, 'academic-task-uploads', req.file.originalname);
+      } catch (uploadErr: any) {
+        console.error('Cloudinary upload error:', uploadErr);
+        return res.status(500).json({ error: 'Failed to upload proof screenshot. Please try again.' });
+      }
+      const screenshot_url = uploadResult.secure_url;
+      cloudinary_public_id = uploadResult.public_id;
+
+      if (existing) {
         // Clean up previous Cloudinary asset
         if (existing.cloudinary_public_id) {
           try {
@@ -4779,9 +4834,30 @@ async function startServer() {
         const newCount = existing.status === 'REJECTED' ? existing.resubmission_count + 1 : existing.resubmission_count;
         await pool.query(`
           UPDATE task_submissions
-          SET status = 'SUBMITTED', screenshot_url = $1, cloudinary_public_id = $2, custom_field_value = $3, submitted_at = NOW(), resubmission_count = $4, original_filename = $5, updated_at = NOW()
-          WHERE id = $6
-        `, [screenshot_url, cloudinary_public_id, custom_field_value, newCount, original_filename, existing.id]);
+          SET status = 'SUBMITTED',
+              screenshot_url = $1,
+              cloudinary_public_id = $2,
+              custom_field_value = $3,
+              submitted_at = NOW(),
+              resubmission_count = $4,
+              original_filename = $5,
+              proof_file_hash = $6,
+              is_duplicate = $7,
+              duplicate_matched_submission_id = $8,
+              updated_at = NOW()
+          WHERE id = $9
+        `, [screenshot_url, cloudinary_public_id, custom_field_value, newCount, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id, existing.id]);
+
+        // Broadcast real-time SSE event
+        broadcastTaskEvent({
+          type: 'SUBMISSION_CREATED',
+          payload: {
+            taskId: task_id,
+            submissionId: existing.id,
+            userId: req.user.id,
+            isDuplicate: is_duplicate
+          }
+        });
 
         // 1. In-App + Chrome Notification to Student
         await createInAppNotification(req.user.id, `Your submission for "${task.title}" has been resubmitted and is awaiting verification.`, 'TASK_SUBMITTED', 'Submission Received');
@@ -4833,10 +4909,25 @@ async function startServer() {
       }
 
       const subRes = await pool.query(`
-        INSERT INTO task_submissions (task_id, user_id, status, screenshot_url, cloudinary_public_id, custom_field_value, original_filename, submitted_at)
-        VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, NOW())
+        INSERT INTO task_submissions (
+          task_id, user_id, status, screenshot_url, cloudinary_public_id,
+          custom_field_value, original_filename, proof_file_hash, is_duplicate,
+          duplicate_matched_submission_id, submitted_at
+        )
+        VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, $7, $8, $9, NOW())
         RETURNING id
-      `, [task_id, req.user.id, screenshot_url, cloudinary_public_id, custom_field_value, original_filename]);
+      `, [task_id, req.user.id, screenshot_url, cloudinary_public_id, custom_field_value, original_filename, proof_file_hash, is_duplicate, duplicate_matched_submission_id]);
+
+      // Broadcast real-time SSE event
+      broadcastTaskEvent({
+        type: 'SUBMISSION_CREATED',
+        payload: {
+          taskId: task_id,
+          submissionId: subRes.rows[0].id,
+          userId: req.user.id,
+          isDuplicate: is_duplicate
+        }
+      });
 
       // 1. In-App + Chrome Notification to Student
       await createInAppNotification(req.user.id, `Your submission for "${task.title}" has been received and is awaiting verification.`, 'TASK_SUBMITTED', 'Submission Received');
@@ -6214,7 +6305,7 @@ async function startServer() {
     const client = await pool.connect();
     try {
       const userRes = await client.query(`
-        SELECT u.id, u.full_name, u.register_number, u.avatar_url,
+        SELECT u.id, u.full_name, u.register_number, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
                d.name as department_name, c.name as class_name, c.batch, c.year
         FROM users u
         LEFT JOIN departments d ON u.department_id = d.id
@@ -6234,14 +6325,14 @@ async function startServer() {
         personalRes, skillsRes, projectsRes, internshipsRes, certsRes,
         codingRes, achieveRes, langRes
       ] = await Promise.all([
-        client.query('SELECT * FROM student_profiles WHERE user_id = $1', [userId]),
-        client.query('SELECT skill_name, proficiency, category FROM student_skills WHERE user_id = $1 ORDER BY proficiency DESC, created_at DESC', [userId]),
-        client.query('SELECT id, project_name, project_name AS project_title, description, tech_stack, github_url, live_demo_url, live_demo_url AS project_url, created_at FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT id, company, company AS company_name, role, role AS role_title, duration, mode, certificate_url, created_at FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT id, certificate_name, certificate_name AS cert_name, provider, provider AS issuer, issue_date, credential_id, certificate_url, certificate_url AS cert_url, created_at FROM student_certifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT github, leetcode, hackerrank, codechef, geeksforgeeks, linkedin, portfolio FROM student_coding_profiles WHERE user_id = $1', [userId]),
-        client.query('SELECT id, title, category, description, event_date, event_date AS date_achieved, created_at FROM student_achievements WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT language, proficiency FROM student_languages WHERE user_id = $1 ORDER BY created_at DESC', [userId])
+        client.query('SELECT * FROM student_profiles WHERE user_id = $1', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT skill_name, proficiency, category FROM student_skills WHERE user_id = $1 ORDER BY proficiency DESC, created_at DESC', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT id, project_name, project_name AS project_title, description, tech_stack, github_url, live_demo_url, live_demo_url AS project_url, created_at FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT id, company, company AS company_name, role, role AS role_title, duration, mode, certificate_url, created_at FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT id, certificate_name, certificate_name AS cert_name, provider, provider AS issuer, issue_date, credential_id, certificate_url, certificate_url AS cert_url, created_at FROM student_certifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT github, leetcode, hackerrank, codechef, geeksforgeeks, linkedin, portfolio FROM student_coding_profiles WHERE user_id = $1', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT id, title, category, description, event_date, event_date AS date_achieved, created_at FROM student_achievements WHERE user_id = $1 ORDER BY created_at DESC', [userId]).catch(() => ({ rows: [] })),
+        client.query('SELECT language, proficiency FROM student_languages WHERE user_id = $1 ORDER BY created_at DESC', [userId]).catch(() => ({ rows: [] }))
       ]);
 
       const personal = personalRes.rows[0] || {};
