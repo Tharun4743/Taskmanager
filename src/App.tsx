@@ -5158,6 +5158,8 @@ export default function App() {
   const notificationDropdownRef = useRef<HTMLDivElement>(null);
   const knownNotificationIdsRef = useRef<Set<number>>(new Set());
   const initialNotifsLoadedRef = useRef<boolean>(false);
+  const lastFocusRefreshRef = useRef<number>(0);
+  const isFetchingIndustryRef = useRef<boolean>(false);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -5859,6 +5861,8 @@ export default function App() {
   const [industryActiveTab, setIndustryActiveTab] = useState<'PENDING' | 'ALL'>('PENDING');
 
   const fetchIndustryData = async (passedToken?: string) => {
+    if (isFetchingIndustryRef.current) return;
+    isFetchingIndustryRef.current = true;
     try {
       const activeUser = user || (localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')!) : null);
       if (!activeUser || (activeUser.role !== 'SUPREME_ADMIN' && activeUser.role !== 'HOD')) return;
@@ -5879,6 +5883,8 @@ export default function App() {
       }
     } catch (e) {
       console.error('Failed to fetch industry partner data', e);
+    } finally {
+      isFetchingIndustryRef.current = false;
     }
   };
 
@@ -5971,6 +5977,8 @@ export default function App() {
     }
   }, [user?.role, user?.id, token]);
 
+
+
   const fetchTelegramStatus = async () => {
     if (!token) return;
     try {
@@ -5985,11 +5993,6 @@ export default function App() {
       console.error('Error fetching Telegram status:', err);
     }
   };
-
-  useEffect(() => {
-    fetchTelegramStatus();
-  }, [token]);
-
 
   const handleSendTestMessage = async (targetId?: string) => {
     setSendingTest(true);
@@ -6264,8 +6267,28 @@ export default function App() {
         map.set(String(s.task_id), s);
       }
     }
+    // Also include team submissions for teams the current student belongs to so team members never see stale "TO SUBMIT"
+    for (const team of myTeams) {
+      if (!team.task_id) continue;
+      const isMember = String(team.leader_id) === uidStr || (team.members && team.members.some(m => String(m.student_id) === uidStr && m.status === 'ACCEPTED'));
+      if (isMember && team.submission && !map.has(String(team.task_id))) {
+        const subStatus = team.submission.status === 'APPROVED' ? 'VERIFIED' : (team.submission.status === 'REJECTED' ? 'REJECTED' : 'SUBMITTED');
+        map.set(String(team.task_id), {
+          id: team.submission.id,
+          task_id: team.task_id,
+          task_title: team.task_title || '',
+          submission_type: 'TEAM',
+          user_id: user.id,
+          status: subStatus,
+          created_at: team.submission.created_at,
+          screenshot_url: team.submission.proof_url,
+          cloudinary_public_id: team.submission.cloudinary_public_id,
+          remarks: team.submission.remarks
+        } as any);
+      }
+    }
     return map;
-  }, [submissions, user?.id]);
+  }, [submissions, myTeams, user?.id]);
   const [sharedTaskModal, setSharedTaskModal] = useState<Task | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [highlightedNoticeId, setHighlightedNoticeId] = useState<string | null>(null);
@@ -7100,9 +7123,9 @@ export default function App() {
 
   useEffect(() => {
     if (token) {
-      // Smart live polling: When SSE is connected, relax rapid polling to a 60s fallback heartbeat.
-      // If SSE is offline or reconnecting, fall back to 15s (verifications/tasks) or 30s.
-      const pollDelay = isSseConnected ? 60000 : ((view === 'verifications' || view === 'tasks') ? 15000 : 30000);
+      // Smart live polling: When SSE is connected, relax rapid polling to a 120s fallback heartbeat.
+      // If SSE is offline or reconnecting, fall back to 30s.
+      const pollDelay = isSseConnected ? 120000 : 30000;
       const interval = setInterval(() => {
         if (document.visibilityState === 'visible') {
           fetchRefresh();
@@ -7111,9 +7134,11 @@ export default function App() {
         }
       }, pollDelay);
 
-      // Instant refresh the moment tab/window gains focus or becomes visible
+      // Throttled refresh when tab gains focus or becomes visible (minimum 30-second cooldown)
       const handleFocusOrVisible = () => {
-        if (document.visibilityState === 'visible') {
+        const now = Date.now();
+        if (document.visibilityState === 'visible' && now - lastFocusRefreshRef.current > 30000) {
+          lastFocusRefreshRef.current = now;
           fetchRefresh();
           if (user?.role === 'SUPREME_ADMIN' || user?.role === 'HOD') fetchIndustryData();
         }
@@ -7130,7 +7155,7 @@ export default function App() {
     } else {
       setIsLoading(false);
     }
-  }, [token, user?.role, view, isSseConnected]);
+  }, [token, user?.role, isSseConnected]);
 
   useEffect(() => {
     if (token && user?.role === 'STUDENT' && view === 'tasks') {
@@ -7255,24 +7280,22 @@ export default function App() {
             else if (curUser.role === 'STUDENT') setStudentStats(bData.stats);
           }
 
-          // Asynchronously trigger role stats in background without blocking
+          // Only trigger role stats if stats were not already provided in the bootstrap payload
           if (curUser) {
-            if (curUser.role === 'SUPREME_ADMIN') {
-              fetchSupremeStats(activeToken);
+            if (!bData.stats) {
+              if (curUser.role === 'SUPREME_ADMIN') fetchSupremeStats(activeToken);
+              else if (curUser.role === 'HOD') fetchHODStats(activeToken);
+              else if (curUser.role === 'CLASS_ADVISOR') fetchAdvisorStats(activeToken);
+              else if (curUser.role === 'STUDENT' && curUser.is_coordinator) fetchCoordinatorStats(activeToken);
+              else if (curUser.role === 'STUDENT') fetchStudentStats(activeToken);
+            }
+            if (curUser.role === 'SUPREME_ADMIN' || curUser.role === 'HOD') {
               fetchIndustryData(activeToken);
-            } else if (curUser.role === 'HOD') {
-              fetchHODStats(activeToken);
-              fetchIndustryData(activeToken);
-            } else if (curUser.role === 'CLASS_ADVISOR' || (curUser.role === 'STUDENT' && curUser.is_coordinator)) {
-              if (curUser.role === 'CLASS_ADVISOR') fetchAdvisorStats(activeToken);
-              if (curUser.role === 'STUDENT' && curUser.is_coordinator) {
-                fetchCoordinatorStats(activeToken);
-                fetchStudentStats(activeToken);
-                fetchMyTeamsAndInvitations();
-              }
+            }
+            if (curUser.role === 'CLASS_ADVISOR' || (curUser.role === 'STUDENT' && curUser.is_coordinator)) {
               fetchMyClass(activeToken);
-            } else if (curUser.role === 'STUDENT') {
-              fetchStudentStats(activeToken);
+            }
+            if (curUser.role === 'STUDENT') {
               fetchMyTeamsAndInvitations();
             }
           }
@@ -7484,6 +7507,9 @@ export default function App() {
       } else {
         fetchTasks();
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
         fetchNotifications();
       }
     } catch (e) {
@@ -7524,7 +7550,7 @@ export default function App() {
     } catch (e) { }
   };
 
-  // Real-Time Server-Sent Events (SSE) Synchronization Effect (R1)
+  // Real-Time Server-Sent Events (SSE) Synchronization with Intelligent Reconnect & Visibility Backoff
   useEffect(() => {
     if (!token) {
       if (sseRef.current) {
@@ -7535,111 +7561,203 @@ export default function App() {
       return;
     }
 
-    const sseUrl = `${API_URL}/api/stream/events?token=${encodeURIComponent(token)}`;
-    const es = new EventSource(sseUrl);
-    sseRef.current = es;
+    let isEffectActive = true;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let backoffDelay = 2000;
 
-    es.onopen = () => {
-      setIsSseConnected(true);
-    };
+    const connectSSE = () => {
+      if (!isEffectActive || !token) return;
 
-    es.onerror = () => {
-      setIsSseConnected(false);
-    };
+      // Close previous connection if still open
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
 
-    es.onmessage = (event) => {
-      try {
-        if (!event.data) return;
-        const data = JSON.parse(event.data);
-        if (!data || !data.type) return;
+      // Do not connect if tab is currently hidden to save active Vercel CPU
+      if (document.visibilityState === 'hidden') {
+        setIsSseConnected(false);
+        return;
+      }
 
-        switch (data.type) {
-          case 'TASK_CREATED': {
-            fetchTasks();
-            if (data.payload?.title) {
-              addToast(`📌 New Task: "${data.payload.title}"`, 'info');
-            }
-            break;
-          }
-          case 'TASK_REOPENED': {
-            const { task_id, deadline } = data.payload || {};
-            if (task_id) {
-              setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
-                ...t,
-                status: 'OPEN',
-                deadline: deadline || t.deadline
-              } : t));
-            }
-            fetchTasks();
-            addToast('🔄 A task was reopened with an extended deadline.', 'info');
-            break;
-          }
-          case 'TASK_STATUS_CHANGED': {
-            const { task_id, status } = data.payload || {};
-            if (task_id && status) {
-              setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
-                ...t,
-                status
-              } : t));
-            }
-            break;
-          }
-          case 'SUBMISSION_VERIFIED': {
-            const { submission_id, status, verification_note, rejection_reason, verified_at } = data.payload || {};
-            if (submission_id) {
-              setSubmissions(prev => prev.map(s => String(s.id) === String(submission_id) ? {
-                ...s,
-                status: status || s.status,
-                verification_note: verification_note !== undefined ? verification_note : s.verification_note,
-                rejection_reason: rejection_reason !== undefined ? rejection_reason : s.rejection_reason,
-                verified_at: verified_at || s.verified_at
-              } : s));
+      const sseUrl = `${API_URL}/api/stream/events?token=${encodeURIComponent(token)}`;
+      const es = new EventSource(sseUrl);
+      sseRef.current = es;
 
-              setInspectingSubmission(prev => (prev && String(prev.id) === String(submission_id)) ? {
-                ...prev,
-                status: status || prev.status,
-                verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
-                rejection_reason: rejection_reason !== undefined ? rejection_reason : prev.rejection_reason,
-                verified_at: verified_at || prev.verified_at
-              } : prev);
-            }
-            break;
-          }
-          case 'SUBMISSIONS_BATCH_VERIFIED': {
-            const { submission_ids, status, verification_note, verified_at } = data.payload || {};
-            if (Array.isArray(submission_ids) && submission_ids.length > 0) {
-              const idSet = new Set(submission_ids.map(String));
-              setSubmissions(prev => prev.map(s => idSet.has(String(s.id)) ? {
-                ...s,
-                status: status || 'VERIFIED',
-                verification_note: verification_note !== undefined ? verification_note : s.verification_note,
-                verified_at: verified_at || s.verified_at
-              } : s));
+      es.onopen = () => {
+        if (!isEffectActive) return;
+        setIsSseConnected(true);
+        backoffDelay = 2000; // Reset backoff on successful handshake
+      };
 
-              setInspectingSubmission(prev => (prev && idSet.has(String(prev.id))) ? {
-                ...prev,
-                status: status || 'VERIFIED',
-                verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
-                verified_at: verified_at || prev.verified_at
-              } : prev);
-            }
-            break;
-          }
-          case 'SUBMISSION_CREATED': {
-            fetchSubmissions();
-            break;
-          }
-          default:
-            break;
+      es.onerror = () => {
+        if (!isEffectActive) return;
+        setIsSseConnected(false);
+        es.close();
+        if (sseRef.current === es) {
+          sseRef.current = null;
         }
-      } catch (err) {
-        console.warn('[SSE Message Parse Error]:', err);
+
+        // Schedule reconnect with exponential backoff + jitter (2s -> 3s -> 4.5s -> max 30s)
+        if (!reconnectTimer && document.visibilityState === 'visible') {
+          const jitter = Math.floor(Math.random() * 1000);
+          const nextWait = Math.min(backoffDelay + jitter, 30000);
+          backoffDelay = Math.min(backoffDelay * 1.5, 30000);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectSSE();
+          }, nextWait);
+        }
+      };
+
+      es.onmessage = (event) => {
+        try {
+          if (!event.data) return;
+          const data = JSON.parse(event.data);
+          if (!data || !data.type) return;
+
+          switch (data.type) {
+            case 'HEARTBEAT_CYCLE': {
+              // Server gracefully cycled stream before 60s timeout; reconnect after short delay
+              es.close();
+              if (sseRef.current === es) sseRef.current = null;
+              if (document.visibilityState === 'visible' && !reconnectTimer) {
+                reconnectTimer = setTimeout(() => {
+                  reconnectTimer = null;
+                  connectSSE();
+                }, 2000);
+              }
+              break;
+            }
+            case 'TASK_CREATED': {
+              fetchTasks();
+              if (data.payload?.title) {
+                addToast(`📌 New Task: "${data.payload.title}"`, 'info');
+              }
+              break;
+            }
+            case 'TASK_REOPENED': {
+              const { task_id, deadline } = data.payload || {};
+              if (task_id) {
+                setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
+                  ...t,
+                  status: 'OPEN',
+                  deadline: deadline || t.deadline
+                } : t));
+              }
+              fetchTasks();
+              addToast('🔄 A task was reopened with an extended deadline.', 'info');
+              break;
+            }
+            case 'TASK_STATUS_CHANGED': {
+              const { task_id, status } = data.payload || {};
+              if (task_id && status) {
+                setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
+                  ...t,
+                  status
+                } : t));
+              }
+              break;
+            }
+            case 'SUBMISSION_VERIFIED': {
+              const { submission_id, status, verification_note, rejection_reason, verified_at } = data.payload || {};
+              if (submission_id) {
+                setSubmissions(prev => prev.map(s => String(s.id) === String(submission_id) ? {
+                  ...s,
+                  status: status || s.status,
+                  verification_note: verification_note !== undefined ? verification_note : s.verification_note,
+                  rejection_reason: rejection_reason !== undefined ? rejection_reason : s.rejection_reason,
+                  verified_at: verified_at || s.verified_at
+                } : s));
+
+                setInspectingSubmission(prev => (prev && String(prev.id) === String(submission_id)) ? {
+                  ...prev,
+                  status: status || prev.status,
+                  verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
+                  rejection_reason: rejection_reason !== undefined ? rejection_reason : prev.rejection_reason,
+                  verified_at: verified_at || prev.verified_at
+                } : prev);
+
+                if (user?.role === 'STUDENT' && user?.is_coordinator) {
+                  fetchCoordinatorStats();
+                }
+              }
+              break;
+            }
+            case 'SUBMISSIONS_BATCH_VERIFIED': {
+              const { submission_ids, status, verification_note, verified_at } = data.payload || {};
+              if (Array.isArray(submission_ids) && submission_ids.length > 0) {
+                const idSet = new Set(submission_ids.map(String));
+                setSubmissions(prev => prev.map(s => idSet.has(String(s.id)) ? {
+                  ...s,
+                  status: status || 'VERIFIED',
+                  verification_note: verification_note !== undefined ? verification_note : s.verification_note,
+                  verified_at: verified_at || s.verified_at
+                } : s));
+
+                setInspectingSubmission(prev => (prev && idSet.has(String(prev.id))) ? {
+                  ...prev,
+                  status: status || 'VERIFIED',
+                  verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
+                  verified_at: verified_at || prev.verified_at
+                } : prev);
+
+                if (user?.role === 'STUDENT' && user?.is_coordinator) {
+                  fetchCoordinatorStats();
+                }
+              }
+              break;
+            }
+            case 'SUBMISSION_CREATED': {
+              fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
+              break;
+            }
+            default:
+              break;
+          }
+        } catch (err) {
+          console.warn('[SSE Message Parse Error]:', err);
+        }
+      };
+    };
+
+    // Connect immediately
+    connectSSE();
+
+    // Pause connection when tab is backgrounded; reconnect immediately when tab becomes visible
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        if (!sseRef.current) {
+          backoffDelay = 2000;
+          connectSSE();
+        }
+      } else {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (sseRef.current) {
+          sseRef.current.close();
+          sseRef.current = null;
+        }
+        setIsSseConnected(false);
       }
     };
 
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
-      es.close();
-      if (sseRef.current === es) {
+      isEffectActive = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (sseRef.current) {
+        sseRef.current.close();
         sseRef.current = null;
       }
       setIsSseConnected(false);
@@ -8258,6 +8376,9 @@ export default function App() {
         setTeamRemarks('');
         if (teamModalTask) openTeamModal(teamModalTask);
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
       } else {
         addToast(data.error || 'Failed to submit team task', 'error');
       }
@@ -8302,6 +8423,9 @@ export default function App() {
           fetchTeamSubmissionsForTask(verificationTaskFilter);
         }
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
       } else {
         addToast(data.error || 'Failed to review submission', 'error');
       }
@@ -8567,6 +8691,9 @@ export default function App() {
         addToast('Task submitted successfully!', 'success');
         // Only refresh submissions after submitting
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
       } else {
         const data = await res.json();
         addToast(`Submission failed: ${data.error}`, 'error');
@@ -8593,6 +8720,9 @@ export default function App() {
         setIsEditingOptOut(prev => ({ ...prev, [taskId]: false }));
         addToast('Recorded: Not participating in this task.', 'info');
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
       } else {
         const data = await res.json();
         addToast(`Failed: ${data.error}`, 'error');
@@ -8654,6 +8784,9 @@ export default function App() {
         } : prev);
 
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
         return true;
       } else {
         addToast(data.error || 'Failed to update submission status', 'error');
@@ -8684,6 +8817,9 @@ export default function App() {
         setSelectedSubmissions([]);
         setVerificationNote('');
         fetchSubmissions();
+        if (user?.role === 'STUDENT' && user?.is_coordinator) {
+          fetchCoordinatorStats();
+        }
       } else {
         addToast(data.error || 'Failed to batch verify submissions', 'error');
       }
@@ -15457,22 +15593,19 @@ export default function App() {
                     ) : isAdvisor ? (() => {
                       const activeClassId = user?.class_id || myClass?.id;
                       const myClassStudentsCount = users.filter(u => u.role === 'STUDENT' && (activeClassId ? String(u.class_id) === String(activeClassId) : true)).length;
-                      const totalClassStudents = myClassStudentsCount || advisorStats?.total_students || 0;
-                      const respondedCount = new Set(submissions.filter(s => {
+                      const totalClassStudents = myClassStudentsCount || (advisorStats?.total_students ?? 0);
+                      const filteredSubs = submissions.filter(s => {
                         const std = users.find(u => u.id === s.user_id);
                         const cid = s.class_id || std?.class_id;
-                        return s.status !== 'NOT_PARTICIPATING' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                      }).map(s => s.user_id)).size;
-                      const pendingCount = new Set(submissions.filter(s => {
-                        const std = users.find(u => u.id === s.user_id);
-                        const cid = s.class_id || std?.class_id;
-                        return s.status === 'SUBMITTED' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                      }).map(s => s.user_id)).size || advisorStats?.submitted_tasks_count || 0;
-                      const verifiedCount = new Set(submissions.filter(s => {
-                        const std = users.find(u => u.id === s.user_id);
-                        const cid = s.class_id || std?.class_id;
-                        return s.status === 'VERIFIED' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                      }).map(s => s.user_id)).size || advisorStats?.verified_tasks_count || 0;
+                        return activeClassId ? String(cid) === String(activeClassId) : true;
+                      });
+                      const respondedCount = new Set(filteredSubs.filter(s => s.status !== 'NOT_PARTICIPATING').map(s => s.user_id)).size;
+                      const pendingCount = submissions.length > 0
+                        ? new Set(filteredSubs.filter(s => s.status === 'SUBMITTED').map(s => s.user_id)).size
+                        : (advisorStats?.submitted_tasks_count ?? 0);
+                      const verifiedCount = submissions.length > 0
+                        ? new Set(filteredSubs.filter(s => s.status === 'VERIFIED').map(s => s.user_id)).size
+                        : (advisorStats?.verified_tasks_count ?? 0);
 
                       return (
                         <div className="flex flex-col gap-5 sm:gap-8">
@@ -15490,22 +15623,19 @@ export default function App() {
                         {isCoordinator ? (() => {
                           const activeClassId = user?.class_id || myClass?.id;
                           const myClassStudentsCount = users.filter(u => u.role === 'STUDENT' && (activeClassId ? String(u.class_id) === String(activeClassId) : true)).length;
-                          const totalClassStudents = myClassStudentsCount || coordinatorStats?.class_student_count || coordinatorStats?.total_students || 0;
-                          const respondedCount = new Set(submissions.filter(s => {
+                          const totalClassStudents = myClassStudentsCount || (coordinatorStats?.class_student_count ?? coordinatorStats?.total_students ?? 0);
+                          const filteredCoordSubs = submissions.filter(s => {
                             const std = users.find(u => u.id === s.user_id);
                             const cid = s.class_id || std?.class_id;
-                            return s.status !== 'NOT_PARTICIPATING' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                          }).map(s => s.user_id)).size;
-                          const pendingCount = new Set(submissions.filter(s => {
-                            const std = users.find(u => u.id === s.user_id);
-                            const cid = s.class_id || std?.class_id;
-                            return s.status === 'SUBMITTED' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                          }).map(s => s.user_id)).size || coordinatorStats?.pending_reviews || 0;
-                          const verifiedCount = new Set(submissions.filter(s => {
-                            const std = users.find(u => u.id === s.user_id);
-                            const cid = s.class_id || std?.class_id;
-                            return s.status === 'VERIFIED' && (activeClassId ? String(cid) === String(activeClassId) : true);
-                          }).map(s => s.user_id)).size || coordinatorStats?.verified_submissions || 0;
+                            return activeClassId ? String(cid) === String(activeClassId) : true;
+                          });
+                          const respondedCount = new Set(filteredCoordSubs.filter(s => s.status !== 'NOT_PARTICIPATING').map(s => s.user_id)).size;
+                          const pendingCount = submissions.length > 0
+                            ? new Set(filteredCoordSubs.filter(s => s.status === 'SUBMITTED').map(s => s.user_id)).size
+                            : (coordinatorStats?.pending_reviews ?? 0);
+                          const verifiedCount = submissions.length > 0
+                            ? new Set(filteredCoordSubs.filter(s => s.status === 'VERIFIED').map(s => s.user_id)).size
+                            : (coordinatorStats?.verified_submissions ?? 0);
 
                           return (
                             <>

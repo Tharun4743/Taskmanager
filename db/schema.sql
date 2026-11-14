@@ -29,8 +29,9 @@ CREATE TABLE IF NOT EXISTS classes (
 -- 3. Users Table (RBAC Architecture)
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email VARCHAR(255) NOT NULL UNIQUE,
-  password_hash VARCHAR(255) NOT NULL,
+  username VARCHAR(255) UNIQUE NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  email VARCHAR(255),
   full_name VARCHAR(255) NOT NULL,
   role VARCHAR(50) NOT NULL, -- 'SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STUDENT'
   department_id UUID REFERENCES departments(id) ON DELETE SET NULL,
@@ -114,6 +115,18 @@ CREATE TABLE IF NOT EXISTS task_submissions (
 CREATE TABLE IF NOT EXISTS system_settings (
   key VARCHAR(255) PRIMARY KEY,
   value TEXT,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 8. Serverless Distributed Lock & Sync Job State
+CREATE TABLE IF NOT EXISTS sync_job_state (
+  job_name VARCHAR(100) PRIMARY KEY,
+  status VARCHAR(50) DEFAULT 'IDLE',
+  locked_at TIMESTAMP,
+  lease_until TIMESTAMP,
+  last_completed_date VARCHAR(20),
+  last_processed_index INTEGER DEFAULT 0,
+  details JSONB DEFAULT '{}'::jsonb,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

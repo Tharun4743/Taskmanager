@@ -24,7 +24,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { pool, initDB, getPoolStatus } from './db.js';
+import { pool, initDB, getPoolStatus, acquireSyncLock, releaseSyncLock, isSyncCompletedToday } from './db.js';
 import { cleanupOnlyTaskScreenshots } from './imageCleanupService.js';
 import { generateDatabaseSnapshot } from './dbBackupService.js';
 import { initSentry } from './sentryService.js';
@@ -429,6 +429,21 @@ if (process.env.CLOUDINARY_CLOUD_NAME) {
   });
 }
 
+/**
+ * Normalizes deadline parsing between UTC server runtimes (such as Vercel) and IST dates (+05:30)
+ */
+export function parseTaskDeadline(deadline: string | Date | null | undefined): Date | null {
+  if (!deadline) return null;
+  if (deadline instanceof Date) return deadline;
+  const str = String(deadline).trim();
+  if (!str) return null;
+  if (str.endsWith('Z') || str.includes('+')) {
+    return new Date(str);
+  }
+  const formatted = str.replace(' ', 'T');
+  return new Date(`${formatted}+05:30`);
+}
+
 const cloudinaryStorage = new CloudinaryStorage({
   cloudinary,
   params: {
@@ -542,15 +557,18 @@ async function startServer() {
   app.set('json spaces', 0);
 
   // Throttle variable for in-request opportunistic scheduler check
+  // In serverless (Vercel) environments, in-request schedulers are disabled to prevent CPU spikes and function timeouts.
   let lastInRequestTick = Date.now();
-  app.use((req, _res, next) => {
-    const now = Date.now();
-    if (now - lastInRequestTick > 60000) {
-      lastInRequestTick = now;
-      checkAndTriggerScheduledAutomations().catch(err => console.error('[Opportunistic Scheduler] Tick error:', err));
-    }
-    next();
-  });
+  if (!isVercel) {
+    app.use((req, _res, next) => {
+      const now = Date.now();
+      if (now - lastInRequestTick > 60000) {
+        lastInRequestTick = now;
+        checkAndTriggerScheduledAutomations().catch(err => console.error('[Opportunistic Scheduler] Tick error:', err));
+      }
+      next();
+    });
+  }
 
   // Enable trust proxy so express-rate-limit correctly identifies individual client IPs behind reverse proxies (Render, Cloudflare, Nginx)
   app.set('trust proxy', 1);
@@ -1152,7 +1170,9 @@ async function startServer() {
   };
 
   const authorize = (roles: string[]) => (req: any, res: any, next: any) => {
-    if (!roles.includes(req.user.role)) {
+    const isUserCoordinator = req.user?.role === 'STUDENT' && Boolean(req.user?.is_coordinator);
+    const hasRole = roles.includes(req.user?.role) || (roles.includes('COORDINATOR') && isUserCoordinator);
+    if (!hasRole) {
       return res.status(403).json({ error: 'Forbidden' });
     }
     next();
@@ -1222,18 +1242,35 @@ async function startServer() {
     // Initial handshake event
     res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientId, timestamp: new Date().toISOString() })}\n\n`);
 
-    // 20-second keepalive heartbeat comment
+    // 20-second keepalive heartbeat comment (0 DB queries, lightweight text)
     const pingInterval = setInterval(() => {
       try {
         res.write(': ping\n\n');
       } catch {
-        clearInterval(pingInterval);
-        sseClients.delete(clientId);
+        cleanup();
       }
     }, 20000);
 
+    // In serverless (Vercel) environments with 60s maxDuration:
+    // Gracefully cycle the connection after 45s with a clean 200 OK before Vercel forcefully terminates it.
+    // This eliminates 60-second runtime timeout errors and avoids repeated 504 error logs.
+    let lifecycleTimeout: NodeJS.Timeout | null = null;
+    if (isVercel) {
+      lifecycleTimeout = setTimeout(() => {
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'HEARTBEAT_CYCLE', timestamp: new Date().toISOString() })}\n\n`);
+          res.end();
+        } catch {}
+        cleanup();
+      }, 45000);
+    }
+
+    let isCleanedUp = false;
     const cleanup = () => {
+      if (isCleanedUp) return;
+      isCleanedUp = true;
       clearInterval(pingInterval);
+      if (lifecycleTimeout) clearTimeout(lifecycleTimeout);
       sseClients.delete(clientId);
     };
 
@@ -1246,19 +1283,28 @@ async function startServer() {
   });
 
   // ── Telegram Bot Notification Endpoints ─────────────────────────────────────
-  // 1. Get Telegram Bot Status & Stats
+  // 1. Get Telegram Bot Status & Stats (Cached in-memory to prevent DB hammering)
   app.get('/api/telegram/status', authenticate, asyncHandler(async (req: any, res: Response) => {
-    const stats = await getTelegramStats();
-    
-    // Check if the current requesting user has telegram linked
-    const userRes = await pool.query('SELECT telegram_chat_id, telegram_username, telegram_linked_at FROM users WHERE id = $1', [req.user.id]);
-    const user = userRes.rows[0];
+    const globalCacheKey = 'telegram_stats_global';
+    let stats = getApiCache(globalCacheKey);
+    if (!stats) {
+      stats = await getTelegramStats();
+      setApiCache(globalCacheKey, stats, 45); // 45 seconds TTL
+    }
+
+    const userCacheKey = `telegram_user_${req.user.id}`;
+    let userTg = getApiCache(userCacheKey);
+    if (!userTg) {
+      const userRes = await pool.query('SELECT telegram_chat_id, telegram_username, telegram_linked_at FROM users WHERE id = $1', [req.user.id]);
+      userTg = userRes.rows[0] || {};
+      setApiCache(userCacheKey, userTg, 30);
+    }
     
     res.json({
       ...stats,
-      currentUserLinked: Boolean(user?.telegram_chat_id),
-      currentUserTelegram: user?.telegram_username || null,
-      currentUserLinkedAt: user?.telegram_linked_at || null
+      currentUserLinked: Boolean(userTg?.telegram_chat_id),
+      currentUserTelegram: userTg?.telegram_username || null,
+      currentUserLinkedAt: userTg?.telegram_linked_at || null
     });
   }));
 
@@ -1321,6 +1367,14 @@ async function startServer() {
   const processedTelegramUpdateIds = new Set<number>();
 
   app.post('/api/telegram/webhook', asyncHandler(async (req: any, res: Response) => {
+    // Validate secret header if configured
+    if (process.env.TELEGRAM_WEBHOOK_SECRET) {
+      const secretHeader = req.headers['x-telegram-bot-api-secret-token'];
+      if (secretHeader !== process.env.TELEGRAM_WEBHOOK_SECRET) {
+        return res.status(403).json({ error: 'Unauthorized webhook request' });
+      }
+    }
+
     const update = req.body;
     if (!update || typeof update !== 'object') {
       return res.status(200).json({ ok: true });
@@ -2039,7 +2093,7 @@ async function startServer() {
     if (req.user.role === 'HOD') {
       const clsRes = await pool.query('SELECT * FROM classes WHERE id = $1 LIMIT 1', [classId]);
       const cls = clsRes.rows[0];
-      if (!cls || cls.department_id.toString() !== req.user.department_id.toString()) {
+      if (!cls || !cls.department_id || !req.user.department_id || String(cls.department_id) !== String(req.user.department_id)) {
         return res.status(403).json({ error: 'Forbidden' });
       }
     }
@@ -2188,7 +2242,7 @@ async function startServer() {
       if (clsId) {
         const targetClassRes = await pool.query('SELECT * FROM classes WHERE id = $1 LIMIT 1', [clsId]);
         const targetClass = targetClassRes.rows[0];
-        if (!targetClass || targetClass.department_id.toString() !== req.user.department_id.toString()) {
+        if (!targetClass || !targetClass.department_id || !req.user.department_id || String(targetClass.department_id) !== String(req.user.department_id)) {
           return res.status(403).json({ error: 'Forbidden: Class does not belong to your department' });
         }
       }
@@ -2241,7 +2295,7 @@ async function startServer() {
       // Validate class belongs to HOD department
       const targetClassRes = await pool.query('SELECT * FROM classes WHERE id = $1 LIMIT 1', [clsId]);
       const targetClass = targetClassRes.rows[0];
-      if (!targetClass || targetClass.department_id.toString() !== req.user.department_id.toString()) {
+      if (!targetClass || !targetClass.department_id || !req.user.department_id || String(targetClass.department_id) !== String(req.user.department_id)) {
         return res.status(403).json({ error: 'Forbidden: Class does not belong to your department' });
       }
     } else if (req.user.role === 'SUPREME_ADMIN') {
@@ -2289,7 +2343,7 @@ async function startServer() {
       if (clsId) {
         const targetClassRes = await pool.query('SELECT * FROM classes WHERE id = $1 LIMIT 1', [clsId]);
         const targetClass = targetClassRes.rows[0];
-        if (!targetClass || targetClass.department_id.toString() !== req.user.department_id.toString()) {
+        if (!targetClass || !targetClass.department_id || !req.user.department_id || String(targetClass.department_id) !== String(req.user.department_id)) {
           return res.status(403).json({ error: 'Forbidden: Class does not belong to your department' });
         }
       }
@@ -2429,9 +2483,45 @@ async function startServer() {
       console.error('Failed to retrieve user submissions for Cloudinary cleanup:', err);
     }
 
-    await pool.query('DELETE FROM task_submissions WHERE user_id = $1', [req.params.id]);
-    await pool.query('DELETE FROM notifications WHERE user_id = $1', [req.params.id]);
-    await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Cascade remove or nullify foreign key references to prevent Postgres 23503 constraint crashes
+      await client.query('DELETE FROM push_subscriptions WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM notifications WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM notification_preferences WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM password_resets WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM user_notification_settings WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM team_members WHERE student_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM team_invitations WHERE invitee_id = $1 OR inviter_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_profiles WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_skills WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_projects WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_internships WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_certifications WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_coding_profiles WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_resumes WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_achievements WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_languages WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM student_career_preferences WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM leetcode_daily_progress WHERE user_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM github_daily_commits WHERE student_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM coding_submissions WHERE student_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM coding_assignments WHERE student_id = $1', [req.params.id]).catch(() => {});
+      await client.query('UPDATE task_submissions SET verified_by_id = NULL WHERE verified_by_id = $1', [req.params.id]).catch(() => {});
+      await client.query('DELETE FROM task_submissions WHERE user_id = $1', [req.params.id]);
+      await client.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+
+      await client.query('COMMIT');
+    } catch (dbErr: any) {
+      await client.query('ROLLBACK');
+      console.error('Failed to delete user:', dbErr);
+      return res.status(500).json({ error: 'Failed to delete user due to database constraints' });
+    } finally {
+      client.release();
+    }
+
     invalidateUserAuthCache(req.params.id);
     invalidateApiCache('users_');
     res.json({ success: true });
@@ -2521,14 +2611,14 @@ async function startServer() {
           SELECT ts.task_id, ts.user_id, u.class_id, u.department_id
           FROM task_submissions ts
           JOIN users u ON ts.user_id = u.id
-          WHERE ts.task_id = ANY($1) 
+          WHERE ts.task_id = ANY($1::uuid[]) 
             AND ts.status IN ('SUBMITTED', 'VERIFIED')
           UNION
           SELECT t.task_id, tm.student_id as user_id, u.class_id, u.department_id
           FROM teams t
           JOIN team_members tm ON tm.team_id = t.id AND tm.status = 'ACCEPTED'
           JOIN users u ON tm.student_id = u.id
-          WHERE t.task_id = ANY($1)
+          WHERE t.task_id = ANY($1::uuid[])
             AND (
               t.status IN ('SUBMITTED', 'APPROVED', 'VERIFIED')
               OR EXISTS (
@@ -2578,14 +2668,14 @@ async function startServer() {
           SELECT ts.task_id, ts.user_id, u.class_id, u.department_id
           FROM task_submissions ts
           JOIN users u ON ts.user_id = u.id
-          WHERE ts.task_id = ANY($1) 
+          WHERE ts.task_id = ANY($1::uuid[]) 
             AND ts.status IN ('SUBMITTED', 'VERIFIED')
           UNION
           SELECT t.task_id, tm.student_id as user_id, u.class_id, u.department_id
           FROM teams t
           JOIN team_members tm ON tm.team_id = t.id AND tm.status = 'ACCEPTED'
           JOIN users u ON tm.student_id = u.id
-          WHERE t.task_id = ANY($1)
+          WHERE t.task_id = ANY($1::uuid[])
             AND (
               t.status IN ('SUBMITTED', 'APPROVED', 'VERIFIED')
               OR EXISTS (
@@ -2717,7 +2807,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/tasks', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'STUDENT']), async (req: any, res) => {
+  app.post('/api/tasks', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'STUDENT']), async (req: any, res) => {
     try {
       taskSchemaValidator.parse(req.body);
     } catch (e: any) {
@@ -2744,6 +2834,11 @@ async function startServer() {
     if (dbUser.role === 'CLASS_ADVISOR' || (dbUser.role === 'STUDENT' && dbUser.is_coordinator)) {
       deptId = dbUser.department_id;
       clsIds = [dbUser.class_id];
+    } else if (dbUser.role === 'FACULTY' || dbUser.role === 'STAFF') {
+      deptId = dbUser.department_id;
+      if (clsIds.length === 0 && dbUser.class_id) {
+        clsIds = [dbUser.class_id];
+      }
     } else if (dbUser.role === 'HOD') {
       deptId = dbUser.department_id;
       if (!class_ids || class_ids.length === 0) {
@@ -2757,8 +2852,8 @@ async function startServer() {
         if (!onlyOwn) {
           return res.status(403).json({ error: 'Forbidden: Cannot assign tasks to other classes' });
         }
-      } else if (dbUser.role === 'HOD') {
-        const validClassesRes = await pool.query('SELECT id FROM classes WHERE id = ANY($1) AND department_id = $2', [clsIds, dbUser.department_id]);
+      } else if (dbUser.role === 'HOD' || dbUser.role === 'FACULTY' || dbUser.role === 'STAFF') {
+        const validClassesRes = await pool.query('SELECT id FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2', [clsIds, dbUser.department_id]);
         if (validClassesRes.rowCount !== clsIds.length) {
           return res.status(403).json({ error: 'Forbidden: Cannot assign tasks to classes outside your department' });
         }
@@ -2902,7 +2997,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/tasks/:id/status', authenticate, authorize(['HOD', 'SUPREME_ADMIN', 'CLASS_ADVISOR', 'STUDENT']), async (req: any, res) => {
+  app.patch('/api/tasks/:id/status', authenticate, authorize(['HOD', 'SUPREME_ADMIN', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'STUDENT']), async (req: any, res) => {
     const { status } = req.body;
     const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [req.params.id]);
     const task = taskRes.rows[0];
@@ -2999,7 +3094,7 @@ async function startServer() {
     res.json({ success: true, status });
   });
 
-  app.patch('/api/tasks/:id/reopen', authenticate, authorize(['HOD', 'SUPREME_ADMIN', 'CLASS_ADVISOR', 'STUDENT']), async (req: any, res) => {
+  app.patch('/api/tasks/:id/reopen', authenticate, authorize(['HOD', 'SUPREME_ADMIN', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'STUDENT']), async (req: any, res) => {
     const { deadline } = req.body;
     if (!deadline) {
       return res.status(400).json({ error: 'New deadline date and time is required to reopen the task.' });
@@ -3060,6 +3155,12 @@ async function startServer() {
       [newDeadline.toISOString(), req.params.id]
     );
 
+    // Reset locked resubmission counts on rejected submissions so students can resubmit (Bug 06)
+    await pool.query(
+      'UPDATE task_submissions SET resubmission_count = 0, updated_at = NOW() WHERE task_id = $1 AND status = \'REJECTED\'',
+      [req.params.id]
+    );
+
     // Invalidate API cache so subsequent requests get fresh data
     invalidateApiCache('tasks_');
     invalidateApiCache('submissions_');
@@ -3074,11 +3175,8 @@ async function startServer() {
       }
     });
 
-    // Return instant success response to client (< 50ms)
-    res.json({ success: true, deadline: newDeadline.toISOString(), status: 'OPEN' });
-
-    // Offload heavy notification pipeline and backup cleanup to background execution
-    setImmediate(async () => {
+    // Notification dispatcher with Vercel serverless safety (Bug 28)
+    const dispatchNotifications = async () => {
       try {
         await cleanupTaskBackup(req.params.id);
       } catch (err) {
@@ -3120,14 +3218,24 @@ async function startServer() {
         const pushTitle = `🔄 Task Reopened: ${task.title}`;
         const pushBody = `Deadline extended to ${newDeadline.toLocaleDateString('en-IN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}. Please submit your work!`;
         if (taskClassIds.length > 0) {
-          sendPushToClasses(taskClassIds, { title: pushTitle, body: pushBody, url: '/' }).catch(e => console.error('[Push Reopen Task Error]:', e));
+          await sendPushToClasses(taskClassIds, { title: pushTitle, body: pushBody, url: '/' }).catch(e => console.error('[Push Reopen Task Error]:', e));
         } else {
-          sendPushToAll({ title: pushTitle, body: pushBody, url: '/' }).catch(e => console.error('[Push Reopen Task Error]:', e));
+          await sendPushToAll({ title: pushTitle, body: pushBody, url: '/' }).catch(e => console.error('[Push Reopen Task Error]:', e));
         }
       } catch (pushErr) {
         console.error('[Push Notification Reopen Error]:', pushErr);
       }
-    });
+    };
+
+    if (isVercel) {
+      await dispatchNotifications().catch(e => console.error('[Reopen Notification Error]:', e));
+      res.json({ success: true, deadline: newDeadline.toISOString(), status: 'OPEN' });
+    } else {
+      res.json({ success: true, deadline: newDeadline.toISOString(), status: 'OPEN' });
+      setImmediate(() => {
+        dispatchNotifications().catch(e => console.error('[Reopen Notification Error]:', e));
+      });
+    }
   });
 
   // ── Fetch Incomplete / Pending Students for a Task ───────────────────────────
@@ -3241,7 +3349,7 @@ async function startServer() {
   });
 
   // ── Trigger Pending Task Email Reminders via Load Balancer ───────────────────
-  app.post('/api/tasks/:id/send-pending-reminder', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR']), async (req: any, res) => {
+  app.post('/api/tasks/:id/send-pending-reminder', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF']), async (req: any, res) => {
     try {
       const taskId = req.params.id;
       const { customMessage } = req.body;
@@ -3282,7 +3390,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/tasks/:id', authenticate, authorize(['HOD']), async (req: any, res) => {
+  app.delete('/api/tasks/:id', authenticate, authorize(['HOD', 'SUPREME_ADMIN']), async (req: any, res) => {
     const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [req.params.id]);
     const task = taskRes.rows[0];
     if (!task) return res.status(404).json({ error: 'Task not found' });
@@ -3290,21 +3398,23 @@ async function startServer() {
     const tcRes = await pool.query('SELECT class_id FROM task_classes WHERE task_id = $1', [task.id]);
     const taskClassIds = tcRes.rows.map(r => r.class_id.toString());
 
-    let isDeptHOD = req.user.role === 'HOD' && (
-      task.department_id?.toString() === req.user.department_id?.toString()
-    );
+    let isAuthorized = req.user.role === 'SUPREME_ADMIN';
 
-    if (!isDeptHOD && req.user.role === 'HOD' && taskClassIds.length > 0) {
-      const hodClassRes = await pool.query(
-        'SELECT 1 FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2 LIMIT 1',
-        [taskClassIds, req.user.department_id]
-      );
-      if (hodClassRes.rowCount && hodClassRes.rowCount > 0) {
-        isDeptHOD = true;
+    if (!isAuthorized && req.user.role === 'HOD') {
+      if (task.department_id?.toString() === req.user.department_id?.toString()) {
+        isAuthorized = true;
+      } else if (taskClassIds.length > 0) {
+        const hodClassRes = await pool.query(
+          'SELECT 1 FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2 LIMIT 1',
+          [taskClassIds, req.user.department_id]
+        );
+        if (hodClassRes.rowCount && hodClassRes.rowCount > 0) {
+          isAuthorized = true;
+        }
       }
     }
 
-    if (!isDeptHOD)
+    if (!isAuthorized)
       return res.status(403).json({ error: 'Forbidden' });
 
     // Clean up Cloudinary assets first (both submissions and poster image)
@@ -3423,7 +3533,7 @@ async function startServer() {
 
     if (memberIds.length > 0) {
       const validClassmatesRes = await pool.query(`
-        SELECT id FROM users WHERE id = ANY($1) AND class_id = $2 AND role = 'STUDENT'
+        SELECT id FROM users WHERE id = ANY($1::uuid[]) AND class_id = $2 AND role = 'STUDENT'
       `, [memberIds, student.class_id]);
 
       if (validClassmatesRes.rowCount !== memberIds.length) {
@@ -3434,7 +3544,7 @@ async function startServer() {
         SELECT u.full_name FROM team_members tm
         JOIN teams t ON tm.team_id = t.id
         JOIN users u ON tm.student_id = u.id
-        WHERE t.task_id = $1 AND tm.student_id = ANY($2) AND tm.status = 'ACCEPTED' AND t.status != 'REJECTED'
+        WHERE t.task_id = $1 AND tm.student_id = ANY($2::uuid[]) AND tm.status = 'ACCEPTED' AND t.status != 'REJECTED'
         LIMIT 1
       `, [taskId, memberIds]);
 
@@ -3522,7 +3632,7 @@ async function startServer() {
         SELECT u.full_name FROM team_members tm
         JOIN teams t ON tm.team_id = t.id
         JOIN users u ON tm.student_id = u.id
-        WHERE t.task_id = $1 AND tm.student_id = ANY($2) AND tm.status = 'ACCEPTED' AND t.status != 'REJECTED'
+        WHERE t.task_id = $1 AND tm.student_id = ANY($2::uuid[]) AND tm.status = 'ACCEPTED' AND t.status != 'REJECTED'
         LIMIT 1
       `, [team.task_id, newStudentIds]);
 
@@ -3880,12 +3990,12 @@ async function startServer() {
   });
 
   // 9. POST /api/team/submit
-  app.post('/api/team/submit', authenticate, authorize(['STUDENT']), upload.single('screenshot'), async (req: any, res) => {
+  app.post('/api/team/submit', authenticate, authorize(['STUDENT']), memoryUpload.single('screenshot'), async (req: any, res) => {
     const { teamId, remarks } = req.body;
     const student = req.user;
 
     if (!teamId) return res.status(400).json({ error: 'Team ID is required' });
-    if (!req.file) return res.status(400).json({ error: 'Proof screenshot file is required' });
+    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'Proof screenshot file is required' });
 
     const teamRes = await pool.query('SELECT * FROM teams WHERE id = $1 LIMIT 1', [teamId]);
     const team = teamRes.rows[0];
@@ -3894,8 +4004,21 @@ async function startServer() {
       return res.status(403).json({ error: 'Only the team leader can submit proof' });
     }
 
+    // Idempotency check: prevent duplicate clicks (Bug 05)
+    if (team.status === 'SUBMITTED' || team.status === 'APPROVED') {
+      return res.status(400).json({ error: 'This team has already submitted proof for this task.' });
+    }
+
     const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [team.task_id]);
     const task = taskRes.rows[0];
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // Hard deadline check normalized for IST/UTC (Bug 31)
+    const parsedDl = parseTaskDeadline(task.deadline);
+    if (parsedDl && new Date() > parsedDl) {
+      return res.status(400).json({ error: 'Hard deadline block — no late uploads possible' });
+    }
+
     const minTeamSize = task.min_team_size || 2;
 
     const pendingCountRes = await pool.query('SELECT COUNT(*) as count FROM team_members WHERE team_id = $1 AND status = \'PENDING\'', [teamId]);
@@ -3913,14 +4036,47 @@ async function startServer() {
 
     const original_filename = (req.file?.originalname || req.body?.original_filename || '').trim() || null;
 
+    // Plagiarism Detection: Compute SHA-256 hash of proof file buffer (Bug 04)
+    const proof_file_hash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+    const dupCheckRes = await pool.query(`
+      SELECT ts.id, ts.submitted_at, u.full_name
+      FROM task_submissions ts
+      JOIN users u ON ts.user_id = u.id
+      WHERE ts.proof_file_hash = $1
+        AND ts.task_id = $2
+      LIMIT 1
+    `, [proof_file_hash, team.task_id]);
+
+    const is_duplicate = dupCheckRes.rows.length > 0;
+
+    // Upload buffer to Cloudinary
+    let proofUrl = '';
+    let cloudinaryId = '';
+    try {
+      const uploadRes = await uploadBufferToCloudinary(req.file.buffer, 'academic-task-uploads', original_filename || undefined);
+      proofUrl = uploadRes.secure_url;
+      cloudinaryId = uploadRes.public_id;
+    } catch (upErr: any) {
+      console.error('Failed to upload team proof to Cloudinary:', upErr);
+      return res.status(500).json({ error: 'Failed to upload proof screenshot. Please try again.' });
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Concurrency lock to prevent simultaneous submissions (Bug 05)
+      const lockedTeamRes = await client.query('SELECT status FROM teams WHERE id = $1 FOR UPDATE', [teamId]);
+      if (lockedTeamRes.rows[0]?.status === 'SUBMITTED' || lockedTeamRes.rows[0]?.status === 'APPROVED') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Team submission has already been recorded.' });
+      }
+
       const subInsert = await client.query(`
         INSERT INTO team_submissions (team_id, submitted_by, proof_url, cloudinary_public_id, remarks, original_filename, status)
         VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
         RETURNING *
-      `, [teamId, student.id, req.file.path, req.file.filename, remarks || '', original_filename]);
+      `, [teamId, student.id, proofUrl, cloudinaryId, remarks || '', original_filename]);
 
       await client.query('UPDATE teams SET status = \'SUBMITTED\', updated_at = CURRENT_TIMESTAMP WHERE id = $1', [teamId]);
 
@@ -3930,14 +4086,14 @@ async function startServer() {
         if (existingSub.rows.length > 0) {
           await client.query(`
             UPDATE task_submissions
-            SET status = 'SUBMITTED', screenshot_url = $1, cloudinary_public_id = $2, submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $3
-          `, [req.file.path, req.file.filename, existingSub.rows[0].id]);
+            SET status = 'SUBMITTED', screenshot_url = $1, cloudinary_public_id = $2, proof_file_hash = $3, is_duplicate = $4, submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $5
+          `, [proofUrl, cloudinaryId, proof_file_hash, is_duplicate, existingSub.rows[0].id]);
         } else {
           await client.query(`
-            INSERT INTO task_submissions (task_id, user_id, status, screenshot_url, cloudinary_public_id, submitted_at)
-            VALUES ($1, $2, 'SUBMITTED', $3, $4, CURRENT_TIMESTAMP)
-          `, [team.task_id, m.student_id, req.file.path, req.file.filename]);
+            INSERT INTO task_submissions (task_id, user_id, status, screenshot_url, cloudinary_public_id, proof_file_hash, is_duplicate, submitted_at)
+            VALUES ($1, $2, 'SUBMITTED', $3, $4, $5, $6, CURRENT_TIMESTAMP)
+          `, [team.task_id, m.student_id, proofUrl, cloudinaryId, proof_file_hash, is_duplicate]);
         }
 
         await client.query(`
@@ -3947,6 +4103,9 @@ async function startServer() {
       }
 
       await client.query('COMMIT');
+      invalidateApiCache('team_subs_');
+      invalidateApiCache('tasks_');
+      invalidateApiCache('submissions_');
       res.json({ success: true, submission: subInsert.rows[0] });
     } catch (err: any) {
       await client.query('ROLLBACK');
@@ -3957,9 +4116,12 @@ async function startServer() {
     }
   });
 
-  // 10. GET /api/team/submissions
+  // 10. GET /api/team/submissions (Cached in-memory to prevent DB hammering)
   app.get('/api/team/submissions', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'STUDENT']), async (req: any, res) => {
     const { taskId, classId } = req.query;
+    const cacheKey = `team_subs_${req.user.role}_${req.user.id}_${taskId || 'all'}_${classId || 'all'}`;
+    const cached = getApiCache(cacheKey);
+    if (cached) return res.json(cached);
 
     try {
       let query = `
@@ -4019,6 +4181,7 @@ async function startServer() {
         submissions.forEach((sub: any) => { sub.members = []; });
       }
 
+      setApiCache(cacheKey, submissions, 20);
       res.json(submissions);
     } catch (err: any) {
       console.error('Fetch team submissions error:', err);
@@ -4080,14 +4243,14 @@ async function startServer() {
           if (existingSub.rows.length > 0) {
             await client.query(`
               UPDATE task_submissions 
-              SET status = 'VERIFIED', screenshot_url = $1, cloudinary_public_id = $2, verification_note = $3, verified_at = CURRENT_TIMESTAMP
+              SET status = 'VERIFIED', screenshot_url = $1, cloudinary_public_id = $2, verification_note = $3, verified_at = CURRENT_TIMESTAMP, verified_by_id = $5, updated_at = NOW()
               WHERE id = $4
-            `, [sub.proof_url, sub.cloudinary_public_id, feedback || 'Approved team submission', existingSub.rows[0].id]);
+            `, [sub.proof_url, sub.cloudinary_public_id, feedback || 'Approved team submission', existingSub.rows[0].id, req.user.id]);
           } else {
             await client.query(`
-              INSERT INTO task_submissions (task_id, user_id, status, screenshot_url, cloudinary_public_id, verification_note, submitted_at, verified_at)
-              VALUES ($1, $2, 'VERIFIED', $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            `, [task.id, m.student_id, sub.proof_url, sub.cloudinary_public_id, feedback || 'Approved team submission']);
+              INSERT INTO task_submissions (task_id, user_id, status, screenshot_url, cloudinary_public_id, verification_note, submitted_at, verified_at, verified_by_id)
+              VALUES ($1, $2, 'VERIFIED', $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $6)
+            `, [task.id, m.student_id, sub.proof_url, sub.cloudinary_public_id, feedback || 'Approved team submission', req.user.id]);
           }
 
           await client.query(`
@@ -4136,7 +4299,20 @@ async function startServer() {
       await client.query('COMMIT');
       invalidateApiCache('tasks_');
       invalidateApiCache('submissions_');
+      invalidateApiCache('team_subs_');
+      invalidateApiCache('stats_coord_');
+      invalidateApiCache('leaderboard_');
       invalidateApiCache('notifs_');
+
+      broadcastTaskEvent({
+        type: 'TEAM_SUBMISSION_UPDATED',
+        payload: {
+          team_id: team.id,
+          task_id: task.id,
+          status,
+          reviewed_by: req.user.full_name || req.user.role
+        }
+      });
       res.json({ success: true });
     } catch (err: any) {
       await client.query('ROLLBACK');
@@ -4195,7 +4371,7 @@ async function startServer() {
 
     const [classesRes, deptStudentsRes] = await Promise.all([
       pool.query('SELECT * FROM classes WHERE department_id = $1 ORDER BY year ASC, name ASC', [deptId]),
-      pool.query('SELECT id, full_name, register_number, class_id FROM users WHERE department_id = $1 AND role = \'STUDENT\' ORDER BY register_number ASC', [deptId])
+      pool.query('SELECT id, full_name, register_number, class_id FROM users WHERE department_id = $1 AND role = \'STUDENT\' AND (is_active IS NULL OR is_active = TRUE) ORDER BY register_number ASC', [deptId])
     ]);
     const classes = classesRes.rows;
     const classIds = classes.map(c => c.id);
@@ -4214,7 +4390,7 @@ async function startServer() {
         FROM tasks t
         LEFT JOIN task_classes tc ON t.id = tc.task_id
         WHERE t.department_id = $1
-           OR tc.class_id = ANY($2)
+           OR tc.class_id = ANY($2::uuid[])
            OR (t.department_id IS NULL AND NOT EXISTS (SELECT 1 FROM task_classes WHERE task_id = t.id))
       `, [deptId, classIds]);
     } else {
@@ -4231,7 +4407,7 @@ async function startServer() {
     const [allSubsRes, allTcRes] = await Promise.all([
       taskIds.length > 0
         ? pool.query(`
-            SELECT task_id, user_id, status FROM task_submissions WHERE task_id = ANY($1)
+            SELECT task_id, user_id, status FROM task_submissions WHERE task_id = ANY($1::uuid[])
             UNION
             SELECT t.task_id, tm.student_id as user_id, 
                    CASE 
@@ -4241,7 +4417,7 @@ async function startServer() {
                    END as status
             FROM teams t
             JOIN team_members tm ON tm.team_id = t.id AND tm.status = 'ACCEPTED'
-            WHERE t.task_id = ANY($1)
+            WHERE t.task_id = ANY($1::uuid[])
               AND (
                 t.status IN ('SUBMITTED', 'APPROVED', 'VERIFIED', 'REJECTED')
                 OR EXISTS (
@@ -4252,7 +4428,7 @@ async function startServer() {
           `, [taskIds])
         : Promise.resolve({ rows: [] }),
       taskIds.length > 0
-        ? pool.query('SELECT task_id, class_id FROM task_classes WHERE task_id = ANY($1)', [taskIds])
+        ? pool.query('SELECT task_id, class_id FROM task_classes WHERE task_id = ANY($1::uuid[])', [taskIds])
         : Promise.resolve({ rows: [] })
     ]);
 
@@ -4401,7 +4577,7 @@ async function startServer() {
     const [allSubsRes, countsRes] = await Promise.all([
       (taskIds.length > 0 && studentIds.length > 0)
         ? pool.query(`
-            SELECT task_id, user_id, status FROM task_submissions WHERE task_id = ANY($1) AND user_id = ANY($2)
+            SELECT task_id, user_id, status FROM task_submissions WHERE task_id = ANY($1::uuid[]) AND user_id = ANY($2::uuid[])
             UNION
             SELECT t.task_id, tm.student_id as user_id, 
                    CASE 
@@ -4411,7 +4587,7 @@ async function startServer() {
                    END as status
             FROM teams t
             JOIN team_members tm ON tm.team_id = t.id AND tm.status = 'ACCEPTED'
-            WHERE t.task_id = ANY($1) AND tm.student_id = ANY($2)
+            WHERE t.task_id = ANY($1::uuid[]) AND tm.student_id = ANY($2::uuid[])
               AND (
                 t.status IN ('SUBMITTED', 'APPROVED', 'VERIFIED', 'REJECTED')
                 OR EXISTS (
@@ -4782,7 +4958,8 @@ async function startServer() {
       if (accessibilityRes.rowCount === 0) {
         return res.status(403).json({ error: 'Forbidden: You do not have access to this task.' });
       }
-      if (task.deadline && new Date() > new Date(task.deadline)) {
+      const parsedDl = parseTaskDeadline(task.deadline);
+      if (parsedDl && new Date() > parsedDl) {
         return res.status(400).json({ error: 'Hard deadline block — no late uploads possible' });
       }
 
@@ -5087,7 +5264,7 @@ async function startServer() {
         FROM task_submissions ts
         JOIN users u ON ts.user_id = u.id
         LEFT JOIN classes c ON u.class_id = c.id
-        WHERE ts.id = ANY($1)
+        WHERE ts.id = ANY($1::uuid[])
       `, [submission_ids]);
 
       for (const row of scopeCheckRes.rows) {
@@ -5114,12 +5291,14 @@ async function startServer() {
     await pool.query(`
       UPDATE task_submissions
       SET status = 'VERIFIED', verification_note = $1, verified_at = CURRENT_TIMESTAMP, verified_by_id = $3, updated_at = NOW()
-      WHERE id = ANY($2) AND status != 'VERIFIED'
+      WHERE id = ANY($2::uuid[]) AND status != 'VERIFIED'
     `, [note, submission_ids, req.user.id]);
 
     // Invalidate API caches immediately
     invalidateApiCache('tasks_');
     invalidateApiCache('submissions_');
+    invalidateApiCache('stats_coord_');
+    invalidateApiCache('leaderboard_');
     invalidateApiCache('notifs_');
 
     broadcastTaskEvent({
@@ -5133,14 +5312,10 @@ async function startServer() {
       }
     });
 
-    // Respond immediately to the client (< 35ms)
-    res.json({ success: true, count: submission_ids.length });
-
-    // Offload notification dispatches to background execution
-    setImmediate(async () => {
+    const dispatchBatchNotifications = async () => {
       try {
         const subsInfo = await pool.query(
-          `SELECT ts.user_id, t.title FROM task_submissions ts JOIN tasks t ON ts.task_id = t.id WHERE ts.id = ANY($1)`,
+          `SELECT ts.user_id, t.title FROM task_submissions ts JOIN tasks t ON ts.task_id = t.id WHERE ts.id = ANY($1::uuid[])`,
           [submission_ids]
         );
         for (const row of subsInfo.rows) {
@@ -5155,18 +5330,30 @@ async function startServer() {
       notifySubmissionBatchVerified(submission_ids).catch(err => console.error('[Telegram Batch Verify Error]:', err));
       
       // Dispatch Web Push notification to verified students
-      pool.query('SELECT DISTINCT user_id FROM task_submissions WHERE id = ANY($1)', [submission_ids])
-        .then(r => {
-          const uIds = r.rows.map(x => x.user_id);
-          if (uIds.length > 0) {
-            sendPushToUsers(uIds, {
-              title: '✅ Tasks Verified!',
-              body: `Your submissions have been approved by ${req.user.full_name || 'Faculty'}.`,
-              url: '/'
-            });
-          }
-        })
-        .catch(e => console.error('[Push Batch Verify Error]:', e));
+      try {
+        const r = await pool.query('SELECT DISTINCT user_id FROM task_submissions WHERE id = ANY($1::uuid[])', [submission_ids]);
+        const uIds = r.rows.map(x => x.user_id);
+        if (uIds.length > 0) {
+          await sendPushToUsers(uIds, {
+            title: '✅ Tasks Verified!',
+            body: `Your submissions have been approved by ${req.user.full_name || 'Faculty'}.`,
+            url: '/'
+          });
+        }
+      } catch (e: any) {
+        console.error('[Push Batch Verify Error]:', e);
+      }
+    };
+
+    if (isVercel) {
+      await dispatchBatchNotifications().catch(e => console.error('[Batch Notification Error]:', e));
+      res.json({ success: true, count: submission_ids.length });
+    } else {
+      res.json({ success: true, count: submission_ids.length });
+      setImmediate(() => {
+        dispatchBatchNotifications().catch(e => console.error('[Batch Notification Error]:', e));
+      });
+    }
     });
   });
 
@@ -5270,6 +5457,8 @@ async function startServer() {
     // Invalidate API caches immediately so all callers receive the updated status
     invalidateApiCache('tasks_');
     invalidateApiCache('submissions_');
+    invalidateApiCache('stats_coord_');
+    invalidateApiCache('leaderboard_');
     invalidateApiCache('notifs_');
 
     broadcastTaskEvent({
@@ -7249,12 +7438,12 @@ async function startServer() {
       }
       // Scope Level 3: Year / Batch Target
       if (t.year && year !== null && Number(t.year) === year) {
-        if (!t.department_id || (departmentId && t.department_id.toString() === departmentId)) {
+        if (!t.department_id || (departmentId && String(t.department_id) === departmentId)) {
           return t;
         }
       }
       // Scope Level 4: Department Target (Only if user_id, class_id, and year are ALL NULL)
-      if (t.department_id && !t.user_id && !t.class_id && !t.year && departmentId && t.department_id.toString() === departmentId) {
+      if (t.department_id && !t.user_id && !t.class_id && !t.year && departmentId && String(t.department_id) === departmentId) {
         return t;
       }
     }
@@ -7357,6 +7546,24 @@ async function startServer() {
 
   // Core Sync Function
   async function syncLeetcodeProgressForScope(scopeFilter?: { departmentId?: string; classId?: string; year?: number; userId?: string; studentId?: string; date?: string }) {
+    const todayStr = scopeFilter?.date || getISTDateStr();
+    const isGlobalSync = !scopeFilter || (!scopeFilter.userId && !scopeFilter.studentId && !scopeFilter.classId && !scopeFilter.departmentId);
+
+    if (isGlobalSync) {
+      const alreadyDone = await isSyncCompletedToday('leetcode_daily_sync', todayStr);
+      if (alreadyDone) {
+        console.log(`[LeetCode Sync] Daily sync for ${todayStr} already completed. Skipping.`);
+        return { success: true, skipped: true, date: todayStr };
+      }
+      const lockAcquired = await acquireSyncLock('leetcode_daily_sync', 300);
+      if (!lockAcquired) {
+        console.log('[LeetCode Sync] Another worker is currently executing sync. Skipping duplicate run.');
+        return { success: true, skipped: true, running: true };
+      }
+    }
+
+    let completedAll = true;
+
     try {
       let query = `
         SELECT u.id, u.register_number, u.full_name, u.class_id, u.department_id,
@@ -7391,8 +7598,18 @@ async function startServer() {
         }
       }
 
+      // Incremental optimization: skip students whose LeetCode progress has already been recorded for today
+      if (isGlobalSync) {
+        params.push(todayStr);
+        query += ` AND NOT EXISTS (
+          SELECT 1 FROM leetcode_daily_progress ldp
+          WHERE ldp.user_id = u.id AND ldp.date = $${params.length} AND ldp.updated_at > NOW() - INTERVAL '12 hours'
+        )`;
+      }
+
       const students = await pool.query(query, params);
-      const todayStr = scopeFilter?.date || getISTDateStr();
+      const totalToSync = students.rows.length;
+      console.log(`[LeetCode Sync] Processing ${totalToSync} student(s) for ${todayStr}...`);
 
       // Timestamps for start & end of target date in IST (UTC+5:30)
       const todayStartSec = Math.floor(new Date(`${todayStr}T00:00:00+05:30`).getTime() / 1000);
@@ -7417,8 +7634,16 @@ async function startServer() {
       let synced = 0;
       let failed = 0;
 
-      const chunkSize = 15;
+      const syncStartTime = Date.now();
+      const chunkSize = 5;
       for (let i = 0; i < students.rows.length; i += chunkSize) {
+        // Enforce safe 45-second execution ceiling on Vercel to prevent 504 timeouts
+        if (isVercel && (Date.now() - syncStartTime > 45000)) {
+          console.warn(`[LeetCode Sync] Approaching Vercel execution ceiling. Saved progress at ${i}/${students.rows.length}.`);
+          completedAll = false;
+          break;
+        }
+
         const chunk = students.rows.slice(i, i + chunkSize);
         await Promise.all(chunk.map(async (student) => {
           const userId = student.id;
@@ -7488,11 +7713,8 @@ async function startServer() {
             if (prevTotal !== null && prevTotal !== undefined) {
               const diffSolved = Math.max(0, fetchedCount - prevTotal);
               if (todaySubmissions.length < 50) {
-                // If today's submissions are less than the 50 limit returned by LeetCode,
-                // then recentTodayCount is exactly correct. Ignore diffSolved to avoid anomalies.
                 solvedToday = recentTodayCount;
               } else {
-                // If they hit the 50 limit today, diffSolved might be higher and more accurate.
                 solvedToday = Math.max(diffSolved, recentTodayCount);
               }
             } else {
@@ -7524,13 +7746,22 @@ async function startServer() {
             `, [userId, todayStr, fetchedCount, solvedToday, solvedYesterday, activeTarget.daily_target, status]);
           }
         }));
+
+        if (i + chunkSize < students.rows.length) {
+          await new Promise(res => setTimeout(res, 200));
+        }
       }
-      return { success: true, synced, failed };
+      return { success: true, synced, failed, partial: !completedAll };
 
     } catch (err) {
       console.error('[syncLeetcodeProgressForScope] Error:', err);
       return { success: false, synced: 0, failed: 0 };
+    } finally {
+      if (isGlobalSync) {
+        await releaseSyncLock('leetcode_daily_sync', completedAll ? todayStr : undefined);
+      }
     }
+  }
   }
 
   // Recalculate Statuses
@@ -8531,9 +8762,12 @@ async function startServer() {
     }, timeUntilSync);
   }
 
-  // Trigger startup sync & start daemon scheduler
-  syncLeetcodeProgressForScope().catch(err => console.error('[LeetCode Sync] Startup sync error:', err));
-  scheduleDailySync();
+  // Trigger startup sync & start daemon scheduler only in persistent server environments with explicit flag
+  // In Vercel serverless environments, automatic schedulers are disabled to prevent extreme CPU exhaustion.
+  if (!isVercel && process.env.ENABLE_LEETCODE_AUTO_SYNC === 'true') {
+    syncLeetcodeProgressForScope().catch(err => console.error('[LeetCode Sync] Startup sync error:', err));
+    scheduleDailySync();
+  }
 
   // ── GitHub Daily Commit Tracking Module ──────────────────────────────────────
 
@@ -8652,7 +8886,23 @@ async function startServer() {
   // Core: Sync Daily GitHub Commits for all (or scoped) students
   async function syncDailyGitHubCommits(scopeFilter?: { departmentId?: string; classId?: string; year?: number; studentId?: string; userId?: string; date?: string }) {
     const dateStr = scopeFilter?.date || getISTDateStr();
+    const isGlobalSync = !scopeFilter || (!scopeFilter.studentId && !scopeFilter.userId && !scopeFilter.classId && !scopeFilter.departmentId);
+
+    if (isGlobalSync) {
+      const alreadyDone = await isSyncCompletedToday('github_daily_sync', dateStr);
+      if (alreadyDone) {
+        console.log(`[GitHub Daily Sync] Daily sync for ${dateStr} already completed. Skipping.`);
+        return { success: true, skipped: true, date: dateStr };
+      }
+      const lockAcquired = await acquireSyncLock('github_daily_sync', 300);
+      if (!lockAcquired) {
+        console.log('[GitHub Daily Sync] Another worker is currently executing sync. Skipping duplicate run.');
+        return { success: true, skipped: true, running: true };
+      }
+    }
+
     let processed = 0, successful = 0, failed = 0, skipped = 0;
+    let completedAll = true;
 
     try {
       let query = `
@@ -8678,6 +8928,15 @@ async function startServer() {
         params.push(scopeFilter.departmentId); query += ` AND u.department_id = $${params.length}`;
       }
 
+      // Incremental optimization: skip students whose GitHub commits have already been recorded for today
+      if (isGlobalSync) {
+        params.push(dateStr);
+        query += ` AND NOT EXISTS (
+          SELECT 1 FROM github_daily_commits gdc
+          WHERE gdc.student_id = u.id AND gdc.date = $${params.length} AND gdc.updated_at > NOW() - INTERVAL '12 hours'
+        )`;
+      }
+
       query += ` ORDER BY u.register_number ASC`;
 
       const students = (await pool.query(query, params)).rows;
@@ -8687,8 +8946,16 @@ async function startServer() {
       // Controlled concurrency in batches of 4 to keep database connections available for web users
       const BATCH_SIZE = 4;
       const BATCH_DELAY_MS = 250;
+      const syncStartTime = Date.now();
 
       for (let i = 0; i < students.length; i += BATCH_SIZE) {
+        // Enforce safe 45-second execution ceiling on Vercel to prevent 504 timeouts
+        if (isVercel && (Date.now() - syncStartTime > 45000)) {
+          console.warn(`[GitHub Daily Sync] Approaching Vercel execution ceiling. Saved progress at ${i}/${students.length}.`);
+          completedAll = false;
+          break;
+        }
+
         const batch = students.slice(i, i + BATCH_SIZE);
 
         await Promise.all(batch.map(async (student) => {
@@ -8738,16 +9005,24 @@ async function startServer() {
         skipped,
         successful,
         failed,
-        date: dateStr
+        date: dateStr,
+        partial: !completedAll
       };
     } catch (err) {
       console.error('[syncDailyGitHubCommits] Error:', err);
       throw err;
+    } finally {
+      if (isGlobalSync) {
+        await releaseSyncLock('github_daily_sync', completedAll ? dateStr : undefined);
+      }
     }
   }
 
-  // Trigger startup GitHub commits sync
-  syncDailyGitHubCommits().catch(err => console.error('[GitHub Daily Sync] Startup sync error:', err));
+  // Trigger startup GitHub commits sync only in persistent server environments with explicit flag
+  // In Vercel serverless functions, automatic sync on startup is strictly disabled to prevent burning CPU & hitting API rate limits.
+  if (!isVercel && process.env.ENABLE_GITHUB_AUTO_SYNC === 'true') {
+    syncDailyGitHubCommits().catch(err => console.error('[GitHub Daily Sync] Startup sync error:', err));
+  }
 
   // Alias for backward compatibility
   const syncGitHubProgressForScope = syncDailyGitHubCommits;
@@ -12207,15 +12482,20 @@ async function startServer() {
     res.json({ message: 'Profile updated' });
   }));
 
-  // ── Admin: Industry Approval ───────────────────────────────────────────────
+  // ── Admin: Industry Approval (Cached in-memory to prevent DB hammering) ────
   app.get('/api/admin/industry/pending', authenticate, asyncHandler(async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
     if (userRole !== 'SUPREME_ADMIN' && userRole !== 'HOD') {
       return res.json([]);
     }
+    const cacheKey = 'industry_pending_list';
+    const cached = getApiCache(cacheKey);
+    if (cached) return res.json(cached);
+
     const result = await pool.query(
       `SELECT cp.*, u.username, u.full_name, u.email, u.created_at as registered_at FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.is_verified = FALSE AND u.role = 'INDUSTRY' ORDER BY u.created_at DESC`
     );
+    setApiCache(cacheKey, result.rows, 30);
     res.json(result.rows);
   }));
 
@@ -12224,9 +12504,14 @@ async function startServer() {
     if (userRole !== 'SUPREME_ADMIN' && userRole !== 'HOD') {
       return res.json([]);
     }
+    const cacheKey = 'industry_all_list';
+    const cached = getApiCache(cacheKey);
+    if (cached) return res.json(cached);
+
     const result = await pool.query(
       `SELECT cp.*, u.username, u.full_name, u.email FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE u.role = 'INDUSTRY' ORDER BY cp.created_at DESC`
     );
+    setApiCache(cacheKey, result.rows, 30);
     res.json(result.rows);
   }));
 
@@ -12237,10 +12522,12 @@ async function startServer() {
     if (approved) {
       await pool.query(`UPDATE company_profiles SET is_verified=TRUE, verified_by=$1, verified_at=NOW(), rejection_reason=NULL WHERE user_id=$2`, [adminId, userId]);
       await pool.query(`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, 'INDUSTRY_APPROVED')`, [userId, '🎉 Your industry account has been approved! You can now post jobs, internships and training programs.']);
+      invalidateApiCache('industry_');
       res.json({ message: 'Industry account approved' });
     } else {
       await pool.query(`UPDATE company_profiles SET rejection_reason=$1, updated_at=NOW() WHERE user_id=$2`, [rejection_reason || 'Not approved', userId]);
       await pool.query(`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, 'INDUSTRY_REJECTED')`, [userId, `Your industry registration was not approved. Reason: ${rejection_reason || 'Not specified'}`]);
+      invalidateApiCache('industry_');
       res.json({ message: 'Industry account rejected' });
     }
   }));
@@ -14097,19 +14384,23 @@ async function startServer() {
   }
 
   // ── Graceful Shutdown Handler for Render redeployments ────────────────────
-  const gracefulShutdown = (signal: string) => {
-    console.log(`[Server] ${signal} received. Closing HTTP server and PostgreSQL pool gracefully...`);
-    pool.end().then(() => {
-      console.log('[Server] Database pool closed. Exiting process cleanly.');
-      process.exit(0);
-    }).catch((err) => {
-      console.error('[Server] Error during database pool shutdown:', err);
-      process.exit(1);
-    });
-  };
+  // In Vercel serverless functions, SIGTERM is used for container lifecycle management.
+  // We must NOT close the database pool or force-exit process on Vercel, allowing warm container reuse.
+  if (!process.env.VERCEL) {
+    const gracefulShutdown = (signal: string) => {
+      console.log(`[Server] ${signal} received. Closing HTTP server and PostgreSQL pool gracefully...`);
+      pool.end().then(() => {
+        console.log('[Server] Database pool closed. Exiting process cleanly.');
+        process.exit(0);
+      }).catch((err) => {
+        console.error('[Server] Error during database pool shutdown:', err);
+        process.exit(1);
+      });
+    };
 
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  }
 
   return app;
 }

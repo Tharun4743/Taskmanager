@@ -70,7 +70,13 @@ export function getPoolStatus() {
   };
 }
 
+let hasVerifiedDBSchema = false;
+
 export async function initDB(forceMigration: boolean = false) {
+  if (hasVerifiedDBSchema && !forceMigration) {
+    return;
+  }
+
   let client;
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
@@ -115,6 +121,7 @@ export async function initDB(forceMigration: boolean = false) {
               console.warn('[initDB] Fast migration step:', mErr?.message);
             }
           }
+          hasVerifiedDBSchema = true;
           return;
         }
       } catch (checkErr: any) {
@@ -782,6 +789,20 @@ export async function initDB(forceMigration: boolean = false) {
     await client.query(`DROP TABLE IF EXISTS email_notifications CASCADE;`);
     await client.query(`DROP TABLE IF EXISTS task_discussions CASCADE;`);
 
+    // ─── Module 6B: Serverless Distributed Lock & Sync Job State ──────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sync_job_state (
+        job_name VARCHAR(100) PRIMARY KEY,
+        status VARCHAR(50) DEFAULT 'IDLE',
+        locked_at TIMESTAMP,
+        lease_until TIMESTAMP,
+        last_completed_date VARCHAR(20),
+        last_processed_index INTEGER DEFAULT 0,
+        details JSONB DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     // Ensure leetcode_url and github_url columns exist on users table
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS leetcode_url VARCHAR(255);`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS github_url VARCHAR(255);`);
@@ -1431,5 +1452,55 @@ export async function initDB(forceMigration: boolean = false) {
     throw err;
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Database-backed distributed lock for serverless scheduled sync jobs.
+ * Prevents multiple Vercel instances from running concurrent synchronizations.
+ */
+export async function acquireSyncLock(jobName: string, leaseSeconds: number = 300): Promise<boolean> {
+  try {
+    const res = await pool.query(`
+      INSERT INTO sync_job_state (job_name, status, locked_at, lease_until, updated_at)
+      VALUES ($1, 'RUNNING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ($2 || ' seconds')::interval, CURRENT_TIMESTAMP)
+      ON CONFLICT (job_name) DO UPDATE
+      SET status = 'RUNNING',
+          locked_at = CURRENT_TIMESTAMP,
+          lease_until = CURRENT_TIMESTAMP + ($2 || ' seconds')::interval,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE sync_job_state.status != 'RUNNING' OR sync_job_state.lease_until < CURRENT_TIMESTAMP
+      RETURNING job_name;
+    `, [jobName, leaseSeconds]);
+
+    return res.rowCount !== null && res.rowCount > 0;
+  } catch (err: any) {
+    console.warn(`[SyncLock] Failed to acquire lock for ${jobName}:`, err.message);
+    return false;
+  }
+}
+
+export async function releaseSyncLock(jobName: string, completedDate?: string, lastProcessedIndex?: number): Promise<void> {
+  try {
+    await pool.query(`
+      UPDATE sync_job_state
+      SET status = 'IDLE',
+          lease_until = CURRENT_TIMESTAMP,
+          last_completed_date = COALESCE($2, last_completed_date),
+          last_processed_index = COALESCE($3, last_processed_index),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE job_name = $1;
+    `, [jobName, completedDate || null, lastProcessedIndex !== undefined ? lastProcessedIndex : null]);
+  } catch (err: any) {
+    console.warn(`[SyncLock] Failed to release lock for ${jobName}:`, err.message);
+  }
+}
+
+export async function isSyncCompletedToday(jobName: string, dateStr: string): Promise<boolean> {
+  try {
+    const res = await pool.query('SELECT 1 FROM sync_job_state WHERE job_name = $1 AND last_completed_date = $2 LIMIT 1', [jobName, dateStr]);
+    return res.rowCount !== null && res.rowCount > 0;
+  } catch (err: any) {
+    return false;
   }
 }

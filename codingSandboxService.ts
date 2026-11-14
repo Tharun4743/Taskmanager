@@ -850,9 +850,29 @@ function transpileToJS(language: SupportedLanguage, sourceCode: string): string 
   } else if (language === 'python') {
     const pyLines = sourceCode.split('\n');
     const converted: string[] = [];
-    for (let l of pyLines) {
-      if (l.trim().startsWith('#') || l.trim().startsWith('import ') || l.trim().startsWith('from ')) continue;
-      if (l.includes("if __name__ == '__main__':") || l.includes('if __name__ == "__main__":')) continue;
+    const indentStack: number[] = [];
+
+    for (let rawLine of pyLines) {
+      if (!rawLine.trim()) {
+        converted.push('');
+        continue;
+      }
+      if (rawLine.trim().startsWith('#') || rawLine.trim().startsWith('import ') || rawLine.trim().startsWith('from ')) continue;
+      if (rawLine.includes("if __name__ == '__main__':") || rawLine.includes('if __name__ == "__main__":')) continue;
+
+      // Calculate indentation level (expanding tabs to 4 spaces)
+      const expanded = rawLine.replace(/\t/g, '    ');
+      const leadingSpaces = (expanded.match(/^(\s*)/) || [''])[0].length;
+
+      // Close blocks when dedenting
+      while (indentStack.length > 0 && leadingSpaces < indentStack[indentStack.length - 1]) {
+        indentStack.pop();
+        converted.push(' '.repeat(Math.max(0, leadingSpaces)) + '}');
+      }
+
+      let l = rawLine.trim();
+      const isBlockOpener = l.endsWith(':');
+
       l = l.replace(/\[\s*::\s*-1\s*\]/g, '.split("").reverse().join("")');
       l = l.replace(/(\w+)\s*,\s*(\w+)\s*=\s*map\(int,\s*input\(\)\.split\(\)\)/g, 'let $1 = Number(tokens[tokenIdx++] || 0); let $2 = Number(tokens[tokenIdx++] || 0);');
       l = l.replace(/\blist\(map\(int,\s*input\(\)\.split\(\)\)\)/g, 'tokens.map(Number)');
@@ -868,13 +888,27 @@ function transpileToJS(language: SupportedLanguage, sourceCode: string): string 
       l = l.replace(/elif\s+([^:]+):/g, '} else if ($1) {');
       l = l.replace(/if\s+([^:]+):/g, 'if ($1) {');
       l = l.replace(/else\s*:/g, '} else {');
-      l = l.replace(/def\s+(\w+)\s*\([^)]*\):/g, 'function $1() {');
-      converted.push(l);
+      l = l.replace(/while\s+([^:]+):/g, 'while ($1) {');
+      l = l.replace(/def\s+(\w+)\s*\(([^)]*)\):/g, 'function $1($2) {');
+
+      if (isBlockOpener && !l.endsWith('{')) {
+        l = l.replace(/:$/, ' {');
+      }
+
+      converted.push(' '.repeat(leadingSpaces) + l);
+
+      if (isBlockOpener) {
+        indentStack.push(leadingSpaces);
+      }
     }
+
+    // Close any remaining open blocks at EOF
+    while (indentStack.length > 0) {
+      indentStack.pop();
+      converted.push('}');
+    }
+
     js = converted.join('\n');
-    const oB = (js.match(/\{/g) || []).length;
-    const cB = (js.match(/\}/g) || []).length;
-    if (oB > cB) js += '\n' + '}'.repeat(oB - cB);
   }
 
   return js;
