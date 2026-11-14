@@ -5128,7 +5128,7 @@ async function startServer() {
         submission_ids,
         status: 'VERIFIED',
         verification_note: note,
-        verified_at: status === 'VERIFIED' ? new Date().toISOString() : null,
+        verified_at: new Date().toISOString(),
         verified_by_id: req.user.id
       }
     });
@@ -5232,10 +5232,10 @@ async function startServer() {
 
       await client.query(`
         UPDATE task_submissions
-        SET status = $1,
+        SET status = $1::varchar,
             verification_note = $2,
             rejection_reason = $3,
-            verified_at = CASE WHEN $1 = 'VERIFIED' THEN NOW() ELSE NULL END,
+            verified_at = CASE WHEN $1::text = 'VERIFIED' THEN NOW() ELSE NULL END,
             verified_by_id = $5,
             updated_at = NOW()
         WHERE id = $4
