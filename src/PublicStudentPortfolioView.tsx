@@ -430,3 +430,4 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
     </div>
   );
 }
+

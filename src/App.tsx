@@ -2082,10 +2082,6 @@ const Footer = ({ onShowModal }: { onShowModal: (type: 'PRIVACY' | 'TERMS' | 'SU
         <button onClick={() => onShowModal('SUPPORT')} className="hover:text-indigo-600 transition-colors whitespace-nowrap cursor-pointer">
           Help & Support
         </button>
-        <span className="text-zinc-300">•</span>
-        <button onClick={() => onShowModal('SOURCES')} className="hover:text-indigo-600 transition-colors whitespace-nowrap cursor-pointer">
-          Sources
-        </button>
       </div>
 
       {/* Right: Developed & Maintained By */}
