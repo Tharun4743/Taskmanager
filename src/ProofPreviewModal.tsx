@@ -17,7 +17,8 @@ import {
   Trash2,
   CheckCircle2,
   Eye,
-  FileCheck
+  FileCheck,
+  AlertTriangle
 } from 'lucide-react';
 
 export interface ProofPreviewData {
@@ -26,6 +27,12 @@ export interface ProofPreviewData {
   filename?: string;
   size?: string;
   isDraft?: boolean;
+  duplicateWarning?: {
+    isDuplicate: boolean;
+    originalStudentName?: string;
+    originalRegisterNumber?: string;
+    originalSubmittedAt?: string;
+  };
   onChangeFile?: () => void;
   onDeleteFile?: () => void;
 }
@@ -126,6 +133,11 @@ export const ProofPreviewModal: React.FC<ProofPreviewModalProps> = ({ data, onCl
               ) : (
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
                   <CheckCircle2 size={10} /> Submitted Proof
+                </span>
+              )}
+              {data.duplicateWarning?.isDuplicate && (
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5 animate-pulse">
+                  <AlertTriangle size={11} className="text-amber-400" /> Duplicate File
                 </span>
               )}
             </div>
@@ -245,6 +257,29 @@ export const ProofPreviewModal: React.FC<ProofPreviewModalProps> = ({ data, onCl
           </button>
         </div>
       </div>
+
+      {/* Amber Duplicate Warning Banner */}
+      {data.duplicateWarning?.isDuplicate && (
+        <div
+          className="w-full bg-amber-500/15 border-b border-amber-500/30 px-4 md:px-6 py-2.5 flex items-center gap-3 text-amber-200 text-xs z-10 shrink-0"
+          onClick={e => e.stopPropagation()}
+        >
+          <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+          <div className="leading-snug">
+            <span className="font-extrabold uppercase tracking-wide text-amber-300 mr-1.5">
+              Duplicate Submission Detected:
+            </span>
+            <span>
+              Identical proof matches submission by{' '}
+              <strong className="text-white font-semibold">
+                {data.duplicateWarning.originalStudentName || 'Another Student'}
+              </strong>
+              {data.duplicateWarning.originalRegisterNumber ? ` (${data.duplicateWarning.originalRegisterNumber})` : ''}
+              {data.duplicateWarning.originalSubmittedAt ? ` submitted on ${new Date(data.duplicateWarning.originalSubmittedAt).toLocaleString()}` : ''}.
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Main Preview Canvas */}
       <div

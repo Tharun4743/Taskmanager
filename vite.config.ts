@@ -26,26 +26,48 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks(id) {
             if (id.includes('node_modules')) {
-              if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
-                return 'vendor-react';
-              }
+              // 1. Separate icon library BEFORE React match
               if (id.includes('lucide-react')) {
                 return 'vendor-icons';
               }
+              // 2. Core React runtime
+              if (
+                id.includes('/react/') ||
+                id.includes('\\react\\') ||
+                id.includes('react-dom') ||
+                id.includes('scheduler') ||
+                id.includes('react/jsx-runtime') ||
+                id.includes('react\\jsx-runtime')
+              ) {
+                return 'vendor-react';
+              }
+              // 3. Motion & Animation
               if (id.includes('motion')) {
                 return 'vendor-motion';
               }
+              // 4. Spreadsheets
               if (id.includes('exceljs') || id.includes('xlsx') || id.includes('jszip')) {
                 return 'vendor-excel';
               }
-              if (id.includes('jspdf') || id.includes('html2canvas')) {
+              // 5. PDF generation & Canvas
+              if (
+                id.includes('jspdf') ||
+                id.includes('html2canvas') ||
+                id.includes('canvg')
+              ) {
                 return 'vendor-pdf';
               }
+              // 6. Monaco Editor
               if (id.includes('monaco-editor') || id.includes('@monaco-editor')) {
                 return 'vendor-monaco';
               }
+              // 7. Sanitization
               if (id.includes('purify') || id.includes('dompurify')) {
                 return 'vendor-purify';
+              }
+              // 8. UI Utilities
+              if (id.includes('tailwind-merge') || id.includes('clsx')) {
+                return 'vendor-utils';
               }
             }
           },

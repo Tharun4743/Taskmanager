@@ -4,8 +4,6 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, Suspense, lazy, Component } from 'react';
-import ExcelJS from 'exceljs';
-import JSZip from 'jszip';
 import { API_URL, FEATURE_FLAGS } from './config';
 
 // Robust lazy loading with automatic reload on deployment chunk hash mismatches
@@ -44,6 +42,9 @@ const StudentOpportunitiesView = lazyWithRetry(() => import('./StudentOpportunit
 const SkillGapAnalyzerView = lazyWithRetry(() => import('./SkillGapAnalyzerView'));
 const StudentCodingAssessmentView = lazyWithRetry(() => import('./StudentCodingAssessmentView'));
 const InstitutionalSkillHeatmapView = lazyWithRetry(() => import('./InstitutionalSkillHeatmapView'));
+const ProofPreviewModal = lazyWithRetry(() => import('./ProofPreviewModal'));
+const MobileBottomNav = lazyWithRetry(() => import('./MobileBottomNav'));
+const PublicStudentPortfolioView = lazyWithRetry(() => import('./PublicStudentPortfolioView'));
 
 // Intelligent View Prefetcher - downloads chunks during browser idle time or on hover so tab clicks are instant (0ms)
 export const prefetchView = (viewName: string) => {
@@ -86,10 +87,9 @@ export const prefetchView = (viewName: string) => {
 };
 
 
-import { generateStudentResumePdf, downloadStudentResumePdf } from './studentProfilePdfGenerator';
-import { generateMergedProofsPdf, ProofPdfItem } from './proofPdfGenerator';
+import type { ProofPdfItem } from './proofPdfGenerator';
 import ThemeToggle from './ThemeToggle';
-import ProofPreviewModal, { ProofPreviewData } from './ProofPreviewModal';
+import type { ProofPreviewData } from './ProofPreviewModal';
 import {
   isPushSupported,
   getNotificationPermissionState,
@@ -187,7 +187,6 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
 import { FloatingModal } from './FloatingModal';
-import { MobileBottomNav } from './MobileBottomNav';
 
 // Helper to render Lucide vector icons for task categories
 const renderCategoryIcon = (category: string, size = 14) => {
@@ -383,6 +382,17 @@ interface Submission {
   verified_by_name?: string | null;
   verified_by_username?: string | null;
   verified_by_role?: string | null;
+  is_duplicate?: boolean;
+  proof_file_hash?: string | null;
+  duplicate_matched_submission_id?: string | null;
+  duplicate_match?: {
+    student_name: string;
+    register_number: string;
+    submitted_at: string;
+  } | null;
+  duplicate_match_name?: string | null;
+  duplicate_match_regno?: string | null;
+  duplicate_match_submitted_at?: string | null;
 }
 
 interface Notification {
@@ -2815,8 +2825,9 @@ function StudentProfileView({
           </div>
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
               if (profile) {
+                const { downloadStudentResumePdf } = await import('./studentProfilePdfGenerator');
                 downloadStudentResumePdf(profile);
                 addToast('Downloading your Profile Resume (PDF)...', 'success');
               } else {
@@ -4278,8 +4289,9 @@ function StaffStudentProfileModal({
           <div className="flex items-center gap-2.5">
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 if (profile) {
+                  const { downloadStudentResumePdf } = await import('./studentProfilePdfGenerator');
                   downloadStudentResumePdf(profile);
                 }
               }}
@@ -4288,6 +4300,17 @@ function StaffStudentProfileModal({
             >
               <Download size={14} /> <span>Download Resume (PDF)</span>
             </button>
+            {acad.register_number && (
+              <a
+                href={`/p/${encodeURIComponent(acad.register_number)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shrink-0"
+                title="View shareable public portfolio"
+              >
+                <Globe size={14} /> <span>Public Portfolio</span>
+              </a>
+            )}
             <button onClick={onClose} className="p-2 hover:bg-zinc-100 rounded-lg text-zinc-400 hover:text-zinc-800 transition-colors border border-transparent hover:border-zinc-200 cursor-pointer">
               <X size={18} />
             </button>
@@ -4732,6 +4755,7 @@ interface AppRouteState {
   footerModal?: 'PRIVACY' | 'TERMS' | 'SUPPORT' | 'SOURCES' | null;
   studentTaskFilter?: 'ALL' | 'PENDING_ACTION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'NOT_INTERESTED' | 'OVERDUE';
   verificationFilter?: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'NOT INTERESTED' | 'ALL';
+  portfolioRegNo?: string;
 }
 
 const parseRouteFromPath = (pathname: string): AppRouteState => {
@@ -4740,6 +4764,21 @@ const parseRouteFromPath = (pathname: string): AppRouteState => {
     .split('#')[0]
     .toLowerCase()
     .replace(/^\/+|\/+$/g, '');
+
+  // Public Student Portfolio route (/p/:regno)
+  if (cleanPath.startsWith('p/')) {
+    const rawReg = cleanPath.slice(2).trim();
+    if (rawReg) return { view: 'public-portfolio', portfolioRegNo: rawReg, footerModal: null };
+  }
+
+  // Public Student Portfolio query (?portfolio=:regno)
+  if (typeof window !== 'undefined') {
+    const sp = new URLSearchParams(window.location.search);
+    const pVal = sp.get('portfolio');
+    if (pVal && pVal.trim()) {
+      return { view: 'public-portfolio', portfolioRegNo: pVal.trim(), footerModal: null };
+    }
+  }
 
   // Footer Modals
   if (cleanPath === 'sources') return { view: 'dashboard', footerModal: 'SOURCES' };
@@ -5010,6 +5049,16 @@ export default function App() {
   });
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
   const [view, setView] = useState<string>(() => (typeof window !== 'undefined' ? parseRouteFromPath(window.location.pathname).view : 'dashboard'));
+  const [publicPortfolioRegNo, setPublicPortfolioRegNo] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const r = parseRouteFromPath(window.location.pathname);
+      if (r.portfolioRegNo) return r.portfolioRegNo;
+      const sp = new URLSearchParams(window.location.search);
+      const q = sp.get('portfolio');
+      if (q && q.trim()) return q.trim();
+    }
+    return null;
+  });
   const [viewingStudentProfileId, setViewingStudentProfileId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(() => {
     try {
@@ -5106,6 +5155,9 @@ export default function App() {
       return cached ? JSON.parse(cached) : [];
     } catch { return []; }
   });
+  // Real-Time SSE Hub Reference & Connection State (R1)
+  const sseRef = useRef<EventSource | null>(null);
+  const [isSseConnected, setIsSseConnected] = useState<boolean>(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const notificationDropdownRef = useRef<HTMLDivElement>(null);
   const knownNotificationIdsRef = useRef<Set<number>>(new Set());
@@ -5716,6 +5768,9 @@ export default function App() {
       isPopStateRef.current = true;
       const route = parseRouteFromPath(window.location.pathname);
       setView(route.view);
+      if (route.portfolioRegNo) {
+        setPublicPortfolioRegNo(route.portfolioRegNo);
+      }
       if (route.codingPlatformTab) {
         setCodingPlatformTab(route.codingPlatformTab);
       }
@@ -7049,8 +7104,9 @@ export default function App() {
 
   useEffect(() => {
     if (token) {
-      // Smart live polling: fast 8s sync when actively viewing tasks or verifications (co-workspace parity), 20s for idle views
-      const pollDelay = (view === 'verifications' || view === 'tasks') ? 8000 : 20000;
+      // Smart live polling: When SSE is connected, relax rapid polling to a 60s fallback heartbeat.
+      // If SSE is offline or reconnecting, fall back to 15s (verifications/tasks) or 30s.
+      const pollDelay = isSseConnected ? 60000 : ((view === 'verifications' || view === 'tasks') ? 15000 : 30000);
       const interval = setInterval(() => {
         if (document.visibilityState === 'visible') {
           fetchRefresh();
@@ -7078,7 +7134,7 @@ export default function App() {
     } else {
       setIsLoading(false);
     }
-  }, [token, user?.role, view]);
+  }, [token, user?.role, view, isSseConnected]);
 
   useEffect(() => {
     if (token && user?.role === 'STUDENT' && view === 'tasks') {
@@ -7472,6 +7528,128 @@ export default function App() {
     } catch (e) { }
   };
 
+  // Real-Time Server-Sent Events (SSE) Synchronization Effect (R1)
+  useEffect(() => {
+    if (!token) {
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      setIsSseConnected(false);
+      return;
+    }
+
+    const sseUrl = `${API_URL}/api/stream/events?token=${encodeURIComponent(token)}`;
+    const es = new EventSource(sseUrl);
+    sseRef.current = es;
+
+    es.onopen = () => {
+      setIsSseConnected(true);
+    };
+
+    es.onerror = () => {
+      setIsSseConnected(false);
+    };
+
+    es.onmessage = (event) => {
+      try {
+        if (!event.data) return;
+        const data = JSON.parse(event.data);
+        if (!data || !data.type) return;
+
+        switch (data.type) {
+          case 'TASK_CREATED': {
+            fetchTasks();
+            if (data.payload?.title) {
+              addToast(`📌 New Task: "${data.payload.title}"`, 'info');
+            }
+            break;
+          }
+          case 'TASK_REOPENED': {
+            const { task_id, deadline } = data.payload || {};
+            if (task_id) {
+              setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
+                ...t,
+                status: 'OPEN',
+                deadline: deadline || t.deadline
+              } : t));
+            }
+            fetchTasks();
+            addToast('🔄 A task was reopened with an extended deadline.', 'info');
+            break;
+          }
+          case 'TASK_STATUS_CHANGED': {
+            const { task_id, status } = data.payload || {};
+            if (task_id && status) {
+              setTasks(prev => prev.map(t => String(t.id) === String(task_id) ? {
+                ...t,
+                status
+              } : t));
+            }
+            break;
+          }
+          case 'SUBMISSION_VERIFIED': {
+            const { submission_id, status, verification_note, rejection_reason, verified_at } = data.payload || {};
+            if (submission_id) {
+              setSubmissions(prev => prev.map(s => String(s.id) === String(submission_id) ? {
+                ...s,
+                status: status || s.status,
+                verification_note: verification_note !== undefined ? verification_note : s.verification_note,
+                rejection_reason: rejection_reason !== undefined ? rejection_reason : s.rejection_reason,
+                verified_at: verified_at || s.verified_at
+              } : s));
+
+              setInspectingSubmission(prev => (prev && String(prev.id) === String(submission_id)) ? {
+                ...prev,
+                status: status || prev.status,
+                verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
+                rejection_reason: rejection_reason !== undefined ? rejection_reason : prev.rejection_reason,
+                verified_at: verified_at || prev.verified_at
+              } : prev);
+            }
+            break;
+          }
+          case 'SUBMISSIONS_BATCH_VERIFIED': {
+            const { submission_ids, status, verification_note, verified_at } = data.payload || {};
+            if (Array.isArray(submission_ids) && submission_ids.length > 0) {
+              const idSet = new Set(submission_ids.map(String));
+              setSubmissions(prev => prev.map(s => idSet.has(String(s.id)) ? {
+                ...s,
+                status: status || 'VERIFIED',
+                verification_note: verification_note !== undefined ? verification_note : s.verification_note,
+                verified_at: verified_at || s.verified_at
+              } : s));
+
+              setInspectingSubmission(prev => (prev && idSet.has(String(prev.id))) ? {
+                ...prev,
+                status: status || 'VERIFIED',
+                verification_note: verification_note !== undefined ? verification_note : prev.verification_note,
+                verified_at: verified_at || prev.verified_at
+              } : prev);
+            }
+            break;
+          }
+          case 'SUBMISSION_CREATED': {
+            fetchSubmissions();
+            break;
+          }
+          default:
+            break;
+        }
+      } catch (err) {
+        console.warn('[SSE Message Parse Error]:', err);
+      }
+    };
+
+    return () => {
+      es.close();
+      if (sseRef.current === es) {
+        sseRef.current = null;
+      }
+      setIsSseConnected(false);
+    };
+  }, [token]);
+
   const fetchUsers = async () => {
     try {
       const savedUserStr = localStorage.getItem('user');
@@ -7811,6 +7989,12 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    if (sseRef.current) {
+      sseRef.current.close();
+      sseRef.current = null;
+    }
+    setIsSseConnected(false);
+
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setToken(null);
@@ -8745,6 +8929,11 @@ export default function App() {
 
       addToast(`Compiling Resume PDFs for ${profiles.length} students...`, 'info');
 
+      const [jszipModule, { generateStudentResumePdf }] = await Promise.all([
+        import('jszip'),
+        import('./studentProfilePdfGenerator'),
+      ]);
+      const JSZip = (jszipModule.default || jszipModule) as any;
       const zip = new JSZip();
       for (const p of profiles) {
         try {
@@ -8821,6 +9010,8 @@ export default function App() {
     const createExcelReportWorkbook = async (
       sheetsData: { name: string; cols: string[]; dataRows: any[]; line5: string }[]
     ): Promise<ArrayBuffer> => {
+      const exceljsModule = await import('exceljs');
+      const ExcelJS = (exceljsModule.default || exceljsModule) as any;
       const workbook = new ExcelJS.Workbook();
       workbook.creator = 'IT Vault';
       workbook.created = new Date();
@@ -9943,6 +10134,8 @@ export default function App() {
       statusText: `Preparing to download ${uniqueItems.length} screenshot${uniqueItems.length > 1 ? 's' : ''}...`
     });
 
+    const jszipModule = await import('jszip');
+    const JSZip = (jszipModule.default || jszipModule) as any;
     const zip = new JSZip();
     let completed = 0;
 
@@ -10327,6 +10520,7 @@ export default function App() {
     };
 
     try {
+      const { generateMergedProofsPdf } = await import('./proofPdfGenerator');
       const pdfBlob = await generateMergedProofsPdf(
         uniqueItems,
         fetchImageBlob,
@@ -10368,6 +10562,31 @@ export default function App() {
       setScreenshotDownloadProgress(null);
     }
   };
+
+  // Public Student Portfolio View (Accessible with or without login via /p/:regno or ?portfolio=:regno)
+  if (view === 'public-portfolio' && publicPortfolioRegNo) {
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center text-zinc-400 p-6">
+            <div className="w-10 h-10 border-3 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-3" />
+            <p className="text-xs font-mono tracking-wide">Loading Verified Student Portfolio...</p>
+          </div>
+        }
+      >
+        <PublicStudentPortfolioView
+          regNo={publicPortfolioRegNo}
+          onBackToApp={() => {
+            setPublicPortfolioRegNo(null);
+            setView('dashboard');
+            if (typeof window !== 'undefined') {
+              window.history.pushState(null, '', '/');
+            }
+          }}
+        />
+      </Suspense>
+    );
+  }
 
   if (!token) {
     const roles = [
@@ -14033,6 +14252,11 @@ export default function App() {
               } className="shrink-0 text-xs">
                 {inspectingSubmission.status === 'SUBMITTED' ? 'PENDING VERIFICATION' : inspectingSubmission.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : inspectingSubmission.status}
               </Badge>
+              {inspectingSubmission.is_duplicate && (
+                <span className="px-2.5 py-1 rounded-lg text-xs font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/40 flex items-center gap-1.5 shrink-0 animate-pulse" title="Identical SHA-256 match with another student's submission">
+                  <AlertTriangle size={12} className="text-amber-500" /> Duplicate File
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
@@ -14094,6 +14318,39 @@ export default function App() {
           <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
             {/* Left / Center: Proof Viewer (7 cols on desktop) */}
             <div className="lg:col-span-7 bg-zinc-950/95 flex flex-col relative overflow-hidden border-b lg:border-b-0 lg:border-r border-zinc-800">
+              {/* Amber Duplicate Warning Bar */}
+              {inspectingSubmission.is_duplicate && (
+                <div className="px-4 py-2 bg-amber-500/20 border-b border-amber-500/30 flex items-center justify-between gap-2 text-amber-200 text-xs z-10 shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+                    <span className="font-bold truncate">
+                      Duplicate Detected: Matches proof from {inspectingSubmission.duplicate_match?.student_name || inspectingSubmission.duplicate_match_name || 'Another Student'}
+                      {(inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno) ? ` (${inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno})` : ''}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProofPreviewData({
+                        url: inspectingSubmission.screenshot_url,
+                        title: inspectingSubmission.task_title,
+                        filename: inspectingSubmission.original_filename || `Proof_${inspectingSubmission.register_number || 'Student'}_${inspectingSubmission.task_title}`,
+                        isDraft: false,
+                        duplicateWarning: {
+                          isDuplicate: true,
+                          originalStudentName: inspectingSubmission.duplicate_match?.student_name || inspectingSubmission.duplicate_match_name || undefined,
+                          originalRegisterNumber: inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno || undefined,
+                          originalSubmittedAt: inspectingSubmission.duplicate_match?.submitted_at || inspectingSubmission.duplicate_match_submitted_at || undefined,
+                        }
+                      });
+                    }}
+                    className="px-2 py-0.5 rounded bg-amber-500/30 hover:bg-amber-500/40 text-amber-200 font-bold text-[11px] shrink-0 transition-colors"
+                  >
+                    Open Proof Modal
+                  </button>
+                </div>
+              )}
+
               {/* Proof Toolbar */}
               {hasProof && (
                 <div className="px-4 py-2 bg-zinc-900/90 backdrop-blur-sm border-b border-zinc-800/80 flex items-center justify-between text-zinc-300 z-10 shrink-0">
@@ -14156,6 +14413,27 @@ export default function App() {
                         </button>
                       </div>
                     ) : null}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProofPreviewData({
+                          url: inspectingSubmission.screenshot_url,
+                          title: inspectingSubmission.task_title,
+                          filename: inspectingSubmission.original_filename || `Proof_${inspectingSubmission.register_number || 'Student'}_${inspectingSubmission.task_title}`,
+                          isDraft: false,
+                          duplicateWarning: inspectingSubmission.is_duplicate ? {
+                            isDuplicate: true,
+                            originalStudentName: inspectingSubmission.duplicate_match?.student_name || inspectingSubmission.duplicate_match_name || undefined,
+                            originalRegisterNumber: inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno || undefined,
+                            originalSubmittedAt: inspectingSubmission.duplicate_match?.submitted_at || inspectingSubmission.duplicate_match_submitted_at || undefined,
+                          } : undefined
+                        });
+                      }}
+                      className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition-colors shrink-0"
+                      title="Open proof in fullscreen modal preview"
+                    >
+                      <Eye size={13} /> Proof Modal
+                    </button>
                     <a
                       href={inspectingSubmission.screenshot_url}
                       target="_blank"
@@ -14236,6 +14514,38 @@ export default function App() {
 
             {/* Right Column: Complete Student & Task Details (5 cols on desktop) */}
             <div className="lg:col-span-5 flex flex-col h-full bg-white overflow-y-auto divide-y divide-zinc-100">
+              {/* Duplicate Submission Warning Alert Card */}
+              {inspectingSubmission.is_duplicate && (
+                <div className="p-4 bg-amber-50 border-b border-amber-200/80 flex items-start gap-3 text-amber-900 shrink-0">
+                  <div className="p-2 rounded-xl bg-amber-100 border border-amber-300 text-amber-700 shrink-0 mt-0.5">
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div className="text-xs space-y-1.5 min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-black uppercase tracking-wider text-amber-900 text-[11px] flex items-center gap-1.5">
+                        <AlertTriangle size={12} className="text-amber-600" /> Duplicate Submission Detected
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-200/80 text-amber-900 border border-amber-300">
+                        SHA-256 Match
+                      </span>
+                    </div>
+                    <p className="text-amber-950 leading-relaxed font-medium">
+                      Identical proof matches earlier submission by{' '}
+                      <strong className="text-zinc-900 font-extrabold">
+                        {inspectingSubmission.duplicate_match?.student_name || inspectingSubmission.duplicate_match_name || 'Another Student'}
+                      </strong>
+                      {(inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno) ? ` (${inspectingSubmission.duplicate_match?.register_number || inspectingSubmission.duplicate_match_regno})` : ''}
+                      {(inspectingSubmission.duplicate_match?.submitted_at || inspectingSubmission.duplicate_match_submitted_at) ? ` submitted on ${new Date(inspectingSubmission.duplicate_match?.submitted_at || inspectingSubmission.duplicate_match_submitted_at!).toLocaleString()}` : ''}.
+                    </p>
+                    {inspectingSubmission.proof_file_hash && (
+                      <p className="font-mono text-[10px] text-amber-800/80 truncate pt-0.5" title={`SHA-256: ${inspectingSubmission.proof_file_hash}`}>
+                        Hash: {inspectingSubmission.proof_file_hash}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Student Profile Card */}
               <div className="p-5 space-y-3">
                 <div className="flex items-start justify-between gap-3">
@@ -16415,6 +16725,30 @@ export default function App() {
                 </motion.div>
               )}
 
+              {view === 'public-portfolio' && publicPortfolioRegNo && (
+                <motion.div
+                  key="public-portfolio"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="w-full h-full flex flex-col min-h-0 overflow-y-auto"
+                >
+                  <Suspense fallback={
+                    <div className="p-12 text-center text-zinc-400">Loading student portfolio...</div>
+                  }>
+                    <PublicStudentPortfolioView
+                      regNo={publicPortfolioRegNo}
+                      onBackToApp={() => {
+                        setPublicPortfolioRegNo(null);
+                        setView('dashboard');
+                        if (typeof window !== 'undefined') {
+                          window.history.pushState(null, '', '/');
+                        }
+                      }}
+                    />
+                  </Suspense>
+                </motion.div>
+              )}
+
               {view === 'tasks' && (
                 <motion.div
                   key="tasks"
@@ -17633,7 +17967,13 @@ export default function App() {
                                               url: submission.screenshot_url,
                                               title: task.title,
                                               filename: submission.original_filename || `Proof_${submission.register_number || 'Student'}_${task.title}`,
-                                              isDraft: false
+                                              isDraft: false,
+                                              duplicateWarning: submission.is_duplicate ? {
+                                                isDuplicate: true,
+                                                originalStudentName: submission.duplicate_match?.student_name || submission.duplicate_match_name || undefined,
+                                                originalRegisterNumber: submission.duplicate_match?.register_number || submission.duplicate_match_regno || undefined,
+                                                originalSubmittedAt: submission.duplicate_match?.submitted_at || submission.duplicate_match_submitted_at || undefined,
+                                              } : undefined
                                             })}
                                             className="text-xs font-bold text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg border border-indigo-200 transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
                                             title="Inspect submitted proof in full resolution"
@@ -18195,12 +18535,19 @@ export default function App() {
                                         </div>
                                       </div>
 
-                                      <Badge variant={
-                                        s.status === 'VERIFIED' ? 'success' :
-                                        s.status === 'REJECTED' ? 'danger' : 'warning'
-                                      } className={cn("shrink-0 text-[10px] font-bold", s.status === 'NOT_PARTICIPATING' ? 'bg-orange-100 text-orange-700 border-orange-200' : '')}>
-                                        {s.status === 'SUBMITTED' ? 'PENDING' : s.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : s.status}
-                                      </Badge>
+                                      <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                                        {s.is_duplicate && (
+                                          <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/40 flex items-center gap-1 shrink-0 animate-pulse" title={`Duplicate of proof by ${s.duplicate_match?.student_name || s.duplicate_match_name || 'another student'}`}>
+                                            <AlertTriangle size={10} className="text-amber-500" /> Duplicate File
+                                          </span>
+                                        )}
+                                        <Badge variant={
+                                          s.status === 'VERIFIED' ? 'success' :
+                                          s.status === 'REJECTED' ? 'danger' : 'warning'
+                                        } className={cn("shrink-0 text-[10px] font-bold", s.status === 'NOT_PARTICIPATING' ? 'bg-orange-100 text-orange-700 border-orange-200' : '')}>
+                                          {s.status === 'SUBMITTED' ? 'PENDING' : s.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : s.status}
+                                        </Badge>
+                                      </div>
                                     </div>
 
                                     <div className="bg-zinc-50 dark:bg-zinc-900/60 p-2.5 rounded-xl border border-zinc-100 dark:border-zinc-800/80 space-y-1">
@@ -18280,7 +18627,14 @@ export default function App() {
                                             />
                                           )}
                                           <div className="min-w-0">
-                                            <p className="text-xs font-bold text-zinc-800 dark:text-zinc-200 truncate">{fileName}</p>
+                                            <div className="flex items-center gap-1.5">
+                                              <p className="text-xs font-bold text-zinc-800 dark:text-zinc-200 truncate">{fileName}</p>
+                                              {s.is_duplicate && (
+                                                <span className="px-1.5 py-0.2 rounded text-[9px] font-black uppercase bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 shrink-0">
+                                                  Duplicate
+                                                </span>
+                                              )}
+                                            </div>
                                             <p className="text-[10px] text-zinc-400 uppercase font-semibold">{isPdf ? 'PDF Document' : 'Screenshot'}</p>
                                           </div>
                                         </div>
@@ -18601,13 +18955,20 @@ export default function App() {
                                               )}
 
                                               <div className="min-w-0 flex-1">
-                                                <span 
-                                                  className="font-mono text-xs font-bold text-zinc-800 hover:text-indigo-600 cursor-pointer block truncate" 
-                                                  onClick={() => setInspectingSubmission(s)}
-                                                  title={`Uploaded file name: ${fileName}`}
-                                                >
-                                                  {fileName}
-                                                </span>
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                  <span 
+                                                    className="font-mono text-xs font-bold text-zinc-800 hover:text-indigo-600 cursor-pointer block truncate" 
+                                                    onClick={() => setInspectingSubmission(s)}
+                                                    title={`Uploaded file name: ${fileName}`}
+                                                  >
+                                                    {fileName}
+                                                  </span>
+                                                  {s.is_duplicate && (
+                                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 border border-amber-500/40 flex items-center gap-1 shrink-0 animate-pulse" title={`Duplicate of proof by ${s.duplicate_match?.student_name || s.duplicate_match_name || 'another student'}`}>
+                                                      <AlertTriangle size={9} className="text-amber-500" /> Duplicate File
+                                                    </span>
+                                                  )}
+                                                </div>
                                                 <div className="flex items-center gap-1.5 pt-0.5">
                                                   <span className="text-[10px] uppercase font-extrabold tracking-wider text-zinc-400">
                                                     {isPdf ? 'PDF' : (fileName.split('.').pop() || 'IMG').toUpperCase()}
@@ -18639,12 +19000,19 @@ export default function App() {
                                     </>
                                   )}
                                   <TD className="text-center">
-                                    <Badge variant={
-                                      s.status === 'VERIFIED' ? 'success' :
-                                        s.status === 'REJECTED' ? 'danger' : 'warning'
-                                    } className={s.status === 'NOT_PARTICIPATING' ? 'bg-orange-100 text-orange-700 border-orange-200' : ''}>
-                                      {s.status === 'SUBMITTED' ? 'PENDING' : s.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : s.status}
-                                    </Badge>
+                                    <div className="flex flex-col items-center gap-1">
+                                      <Badge variant={
+                                        s.status === 'VERIFIED' ? 'success' :
+                                          s.status === 'REJECTED' ? 'danger' : 'warning'
+                                      } className={s.status === 'NOT_PARTICIPATING' ? 'bg-orange-100 text-orange-700 border-orange-200' : ''}>
+                                        {s.status === 'SUBMITTED' ? 'PENDING' : s.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : s.status}
+                                      </Badge>
+                                      {s.is_duplicate && (
+                                        <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 border border-amber-500/40 flex items-center gap-1 shrink-0 animate-pulse" title={`Duplicate of proof by ${s.duplicate_match?.student_name || s.duplicate_match_name || 'another student'}`}>
+                                          <AlertTriangle size={9} className="text-amber-500" /> Duplicate
+                                        </span>
+                                      )}
+                                    </div>
                                   </TD>
                                   <TD className="text-right">
                                     <div className="flex items-center justify-end gap-1.5 flex-wrap">
@@ -20452,16 +20820,18 @@ export default function App() {
           </AnimatePresence>
         </main >
         {/* Role-Based Mobile Bottom Navigation (Visible on Mobile / Tablet < 1024px) */}
-        <MobileBottomNav
-          currentView={view}
-          onSelectView={(v) => {
-            setView(v);
-            setIsMobileSidebarOpen(false);
-          }}
-          user={user}
-          pendingVerificationCount={pendingVerificationCount}
-          onLogout={handleLogout}
-        />
+        <Suspense fallback={null}>
+          <MobileBottomNav
+            currentView={view}
+            onSelectView={(v) => {
+              setView(v);
+              setIsMobileSidebarOpen(false);
+            }}
+            user={user}
+            pendingVerificationCount={pendingVerificationCount}
+            onLogout={handleLogout}
+          />
+        </Suspense>
         {/* HOD Extend Deadline & Reopen Modal */}
         <AnimatePresence>
           {extendingTask && (
@@ -20671,10 +21041,14 @@ export default function App() {
 
         </AnimatePresence>
 
-        <ProofPreviewModal
-          data={proofPreviewData}
-          onClose={() => setProofPreviewData(null)}
-        />
+        {proofPreviewData && (
+          <Suspense fallback={null}>
+            <ProofPreviewModal
+              data={proofPreviewData}
+              onClose={() => setProofPreviewData(null)}
+            />
+          </Suspense>
+        )}
       </div>
     </FooterContext.Provider>
   );

@@ -226,6 +226,9 @@ export async function initDB(forceMigration: boolean = false) {
         rejection_reason TEXT,
         resubmission_count INT DEFAULT 0,
         original_filename VARCHAR(500),
+        proof_file_hash VARCHAR(64),
+        is_duplicate BOOLEAN DEFAULT FALSE,
+        duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL,
         submitted_at TIMESTAMP,
         verified_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -615,6 +618,11 @@ export async function initDB(forceMigration: boolean = false) {
     `);
     await client.query(`
       ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS verified_by_id UUID REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS proof_file_hash VARCHAR(64);
+      ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT FALSE;
+      ALTER TABLE task_submissions ADD COLUMN IF NOT EXISTS duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_task_submissions_hash ON task_submissions (proof_file_hash);
+      ALTER TABLE team_submissions ADD COLUMN IF NOT EXISTS proof_file_hash VARCHAR(64);
     `);
 
 
@@ -656,6 +664,7 @@ export async function initDB(forceMigration: boolean = false) {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users(LOWER(email));`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_student_coding_user ON student_coding_profiles(user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_student_profiles_user ON student_profiles(user_id);`);
+    await client.query(`ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS is_public_portfolio BOOLEAN DEFAULT TRUE;`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_student_skills_user ON student_skills(user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_student_projects_user ON student_projects(user_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_student_internships_user ON student_internships(user_id);`);

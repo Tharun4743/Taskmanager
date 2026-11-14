@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS task_submissions (
   not_participating BOOLEAN DEFAULT FALSE,
   not_participating_reason TEXT,
   verified_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  proof_file_hash VARCHAR(64),
+  is_duplicate BOOLEAN DEFAULT FALSE,
+  duplicate_matched_submission_id UUID REFERENCES task_submissions(id) ON DELETE SET NULL,
   submitted_at TIMESTAMP,
   verified_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -118,3 +121,4 @@ CREATE TABLE IF NOT EXISTS system_settings (
 CREATE INDEX IF NOT EXISTS idx_tasks_pre_deadline ON tasks (status, deadline, backed_up_deadline) WHERE status = 'OPEN' AND deadline IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_task_submissions_task_id ON task_submissions (task_id);
 CREATE INDEX IF NOT EXISTS idx_task_submissions_status ON task_submissions (status);
+CREATE INDEX IF NOT EXISTS idx_task_submissions_hash ON task_submissions (proof_file_hash);

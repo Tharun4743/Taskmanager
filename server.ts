@@ -6062,6 +6062,92 @@ async function startServer() {
     res.json({ message: 'Profile photo updated successfully', avatar_url: avatarUrl, user: updatedUserRes.rows[0] });
   }));
 
+  // Public Student Portfolio (Sanitized, Read-Only, Open Access via /p/:regno or ?portfolio=:regno)
+  app.get('/api/public/portfolio/:regno', asyncHandler(async (req: Request, res: Response) => {
+    const rawRegNo = (req.params.regno || '').trim();
+    if (!rawRegNo) {
+      return res.status(400).json({ error: 'Register number is required' });
+    }
+
+    const client = await pool.connect();
+    try {
+      const userRes = await client.query(`
+        SELECT u.id, u.full_name, u.register_number, u.avatar_url,
+               d.name as department_name, c.name as class_name, c.batch, c.year
+        FROM users u
+        LEFT JOIN departments d ON u.department_id = d.id
+        LEFT JOIN classes c ON u.class_id = c.id
+        WHERE UPPER(u.register_number) = UPPER($1) AND u.role = 'STUDENT'
+        LIMIT 1
+      `, [rawRegNo]);
+
+      if (userRes.rowCount === 0) {
+        return res.status(404).json({ error: 'Student public profile not found' });
+      }
+
+      const student = userRes.rows[0];
+      const userId = student.id;
+
+      const [
+        personalRes, skillsRes, projectsRes, internshipsRes, certsRes,
+        codingRes, achieveRes, langRes
+      ] = await Promise.all([
+        client.query('SELECT semester, cgpa, about_me, is_public_portfolio FROM student_profiles WHERE user_id = $1', [userId]),
+        client.query('SELECT skill_name, proficiency, category FROM student_skills WHERE user_id = $1 ORDER BY proficiency DESC, created_at DESC', [userId]),
+        client.query('SELECT project_title, tech_stack, project_url, github_url, description FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT company_name, role_title, duration, description FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT cert_name, issuer, issue_date, cert_url FROM student_certifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT github, leetcode, hackerrank, codechef, geeksforgeeks, linkedin, portfolio FROM student_coding_profiles WHERE user_id = $1', [userId]),
+        client.query('SELECT title, category, description, date_achieved FROM student_achievements WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT language, proficiency FROM student_languages WHERE user_id = $1 ORDER BY created_at DESC', [userId])
+      ]);
+
+      const personal = personalRes.rows[0] || {};
+      if (personal.is_public_portfolio === false) {
+        return res.status(403).json({ error: 'This student has chosen to keep their portfolio private.' });
+      }
+
+      res.json({
+        academic: {
+          full_name: student.full_name,
+          register_number: student.register_number,
+          avatar_url: student.avatar_url,
+          department_name: student.department_name || 'Information Technology',
+          class_name: student.class_name,
+          batch: student.batch || '2023 - 2027',
+          year: student.year ? (String(student.year).startsWith('Year') ? student.year : `Year ${student.year}`) : 'Year III'
+        },
+        personal: {
+          semester: personal.semester || null,
+          cgpa: personal.cgpa || null,
+          about_me: personal.about_me || '',
+          is_public: personal.is_public_portfolio !== false
+        },
+        skills: skillsRes.rows,
+        projects: projectsRes.rows,
+        internships: internshipsRes.rows,
+        certifications: certsRes.rows,
+        coding_profiles: codingRes.rows[0] || null,
+        achievements: achieveRes.rows,
+        languages: langRes.rows
+      });
+    } finally {
+      client.release();
+    }
+  }));
+
+  // Student toggle for public portfolio visibility
+  app.patch('/api/student/profile/public-portfolio', authenticate, authorize(['STUDENT']), asyncHandler(async (req: any, res: Response) => {
+    const isPublic = Boolean(req.body.is_public);
+    await pool.query(`
+      INSERT INTO student_profiles (user_id, is_public_portfolio, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET is_public_portfolio = $2, updated_at = NOW()
+    `, [req.user.id, isPublic]);
+
+    res.json({ success: true, is_public: isPublic });
+  }));
+
   // 1. Personal Information Update
   app.put('/api/student/profile/personal', authenticate, authorize(['STUDENT']), asyncHandler(async (req: any, res: Response) => {
     const userId = req.user.id;
