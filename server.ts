@@ -377,6 +377,34 @@ const __dirname = path.dirname(__filename);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'vsbec_super_secret_jwt_key_2026';
 
+// ─── Real-Time SSE Hub & Event Broadcaster ──────────────────────────────────
+export interface SseClient {
+  id: string;
+  res: Response;
+  userId: string;
+  role: string;
+  departmentId?: string;
+  classId?: string;
+  connectedAt: Date;
+}
+
+export const sseClients = new Map<string, SseClient>();
+
+export function broadcastTaskEvent(event: { type: string; payload?: any }) {
+  if (!event || !event.type) return;
+  const payloadString = `data: ${JSON.stringify(event)}\n\n`;
+  for (const [id, client] of sseClients.entries()) {
+    try {
+      client.res.write(payloadString);
+      if (typeof (client.res as any).flush === 'function') {
+        (client.res as any).flush();
+      }
+    } catch {
+      sseClients.delete(id);
+    }
+  }
+}
+
 const missingCloudinary = [
   'CLOUDINARY_CLOUD_NAME',
   'CLOUDINARY_API_KEY',
@@ -1120,6 +1148,71 @@ async function startServer() {
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(snapshot.filePath)}"`);
     res.send(JSON.stringify(snapshot.backupPayload, null, 2));
   }));
+
+  // ── Real-Time Server-Sent Events (SSE) Stream ────────────────────────────────
+  app.get('/api/stream/events', async (req: Request, res: Response) => {
+    let token = '';
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7).trim();
+    } else if (req.query?.token && typeof req.query.token === 'string') {
+      token = req.query.token.trim();
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required for live event stream' });
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired stream token' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const client: SseClient = {
+      id: clientId,
+      res,
+      userId: decoded.id,
+      role: decoded.role,
+      departmentId: decoded.department_id,
+      classId: decoded.class_id,
+      connectedAt: new Date(),
+    };
+
+    sseClients.set(clientId, client);
+
+    // Initial handshake event
+    res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientId, timestamp: new Date().toISOString() })}\n\n`);
+
+    // 20-second keepalive heartbeat comment
+    const pingInterval = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(pingInterval);
+        sseClients.delete(clientId);
+      }
+    }, 20000);
+
+    const cleanup = () => {
+      clearInterval(pingInterval);
+      sseClients.delete(clientId);
+    };
+
+    req.on('close', cleanup);
+    req.on('end', cleanup);
+    res.on('finish', cleanup);
+    res.on('close', cleanup);
+  });
 
   // ── Telegram Bot Notification Endpoints ─────────────────────────────────────
   // 1. Get Telegram Bot Status & Stats
@@ -6094,11 +6187,11 @@ async function startServer() {
       ] = await Promise.all([
         client.query('SELECT * FROM student_profiles WHERE user_id = $1', [userId]),
         client.query('SELECT skill_name, proficiency, category FROM student_skills WHERE user_id = $1 ORDER BY proficiency DESC, created_at DESC', [userId]),
-        client.query('SELECT project_title, tech_stack, project_url, github_url, description FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT company_name, role_title, duration, description FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
-        client.query('SELECT cert_name, issuer, issue_date, cert_url FROM student_certifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT id, project_name, project_name AS project_title, description, tech_stack, github_url, live_demo_url, live_demo_url AS project_url, created_at FROM student_projects WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT id, company, company AS company_name, role, role AS role_title, duration, mode, certificate_url, created_at FROM student_internships WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT id, certificate_name, certificate_name AS cert_name, provider, provider AS issuer, issue_date, credential_id, certificate_url, certificate_url AS cert_url, created_at FROM student_certifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
         client.query('SELECT github, leetcode, hackerrank, codechef, geeksforgeeks, linkedin, portfolio FROM student_coding_profiles WHERE user_id = $1', [userId]),
-        client.query('SELECT title, category, description, date_achieved FROM student_achievements WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
+        client.query('SELECT id, title, category, description, event_date, event_date AS date_achieved, created_at FROM student_achievements WHERE user_id = $1 ORDER BY created_at DESC', [userId]),
         client.query('SELECT language, proficiency FROM student_languages WHERE user_id = $1 ORDER BY created_at DESC', [userId])
       ]);
 

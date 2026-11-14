@@ -285,41 +285,45 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
               <Code2 size={18} className="text-emerald-400" /> Featured Projects
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {projects.map((p: any, idx: number) => (
-                <div key={idx} className="p-5 rounded-2xl bg-zinc-950/60 border border-zinc-800 space-y-3 flex flex-col justify-between">
-                  <div className="space-y-1.5">
-                    <h3 className="font-bold text-white text-base">{p.project_title}</h3>
-                    {p.tech_stack && (
-                      <p className="text-xs font-mono text-emerald-400">{p.tech_stack}</p>
-                    )}
-                    {p.description && (
-                      <p className="text-xs text-zinc-400 leading-relaxed line-clamp-3">{p.description}</p>
-                    )}
+              {projects.map((p: any, idx: number) => {
+                const title = p.project_title || p.project_name || 'Project';
+                const liveUrl = p.project_url || p.live_demo_url;
+                return (
+                  <div key={idx} className="p-5 rounded-2xl bg-zinc-950/60 border border-zinc-800 space-y-3 flex flex-col justify-between">
+                    <div className="space-y-1.5">
+                      <h3 className="font-bold text-white text-base">{title}</h3>
+                      {p.tech_stack && (
+                        <p className="text-xs font-mono text-emerald-400">{p.tech_stack}</p>
+                      )}
+                      {p.description && (
+                        <p className="text-xs text-zinc-400 leading-relaxed line-clamp-3">{p.description}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 pt-2">
+                      {liveUrl && (
+                        <a
+                          href={liveUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
+                        >
+                          Live Demo <ExternalLink size={12} />
+                        </a>
+                      )}
+                      {p.github_url && (
+                        <a
+                          href={p.github_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-zinc-400 hover:text-zinc-200 font-semibold flex items-center gap-1"
+                        >
+                          Source <Github size={12} />
+                        </a>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 pt-2">
-                    {p.project_url && (
-                      <a
-                        href={p.project_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
-                      >
-                        Live Demo <ExternalLink size={12} />
-                      </a>
-                    )}
-                    {p.github_url && (
-                      <a
-                        href={p.github_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-zinc-400 hover:text-zinc-200 font-semibold flex items-center gap-1"
-                      >
-                        Source <Github size={12} />
-                      </a>
-                    )}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
@@ -331,18 +335,22 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
               <Briefcase size={18} className="text-emerald-400" /> Industry Internships & Experience
             </h2>
             <div className="space-y-3">
-              {internships.map((int: any, idx: number) => (
-                <div key={idx} className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-bold text-sm text-zinc-100">{int.role_title}</h3>
-                    <span className="text-xs font-mono text-zinc-500">{int.duration}</span>
+              {internships.map((int: any, idx: number) => {
+                const role = int.role_title || int.role || 'Intern';
+                const company = int.company_name || int.company || 'Company';
+                return (
+                  <div key={idx} className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-zinc-100">{role}</h3>
+                      {int.duration && <span className="text-xs font-mono text-zinc-500">{int.duration}</span>}
+                    </div>
+                    <p className="text-xs font-semibold text-emerald-400">{company}</p>
+                    {int.description && (
+                      <p className="text-xs text-zinc-400 pt-1 leading-relaxed">{int.description}</p>
+                    )}
                   </div>
-                  <p className="text-xs font-semibold text-emerald-400">{int.company_name}</p>
-                  {int.description && (
-                    <p className="text-xs text-zinc-400 pt-1 leading-relaxed">{int.description}</p>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
@@ -354,25 +362,30 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
               <Award size={18} className="text-emerald-400" /> Verified Certifications
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {certifications.map((c: any, idx: number) => (
-                <div key={idx} className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-bold text-xs text-zinc-100">{c.cert_name}</h3>
-                    <p className="text-[11px] text-zinc-400">{c.issuer} {c.issue_date ? `• ${c.issue_date}` : ''}</p>
+              {certifications.map((c: any, idx: number) => {
+                const certName = c.cert_name || c.certificate_name || 'Certification';
+                const issuer = c.issuer || c.provider || '';
+                const certLink = c.cert_url || c.certificate_url;
+                return (
+                  <div key={idx} className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800 flex items-center justify-between">
+                    <div>
+                      <h3 className="font-bold text-xs text-zinc-100">{certName}</h3>
+                      <p className="text-[11px] text-zinc-400">{issuer} {c.issue_date ? `• ${c.issue_date}` : ''}</p>
+                    </div>
+                    {certLink && (
+                      <a
+                        href={certLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300 hover:text-white"
+                        title="View Credential"
+                      >
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
                   </div>
-                  {c.cert_url && (
-                    <a
-                      href={c.cert_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300 hover:text-white"
-                      title="View Credential"
-                    >
-                      <ExternalLink size={14} />
-                    </a>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
