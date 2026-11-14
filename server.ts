@@ -2828,6 +2828,20 @@ async function startServer() {
         sendPushToAll({ title: pushTitle, body: pushBody, url: '/' }).catch(e => console.error('[Push Task Error]:', e));
       }
 
+      broadcastTaskEvent({
+        type: 'TASK_CREATED',
+        payload: {
+          task_id: t.id,
+          title: t.title,
+          category: t.category,
+          deadline: t.deadline,
+          status: t.status,
+          department_id: t.department_id,
+          class_ids: clsIds,
+          creator_name: dbUser.full_name
+        }
+      });
+
       res.json({
         id: t.id,
         title: t.title,
@@ -3018,6 +3032,16 @@ async function startServer() {
     // Invalidate API cache so subsequent requests get fresh data
     invalidateApiCache('tasks_');
     invalidateApiCache('submissions_');
+
+    broadcastTaskEvent({
+      type: 'TASK_REOPENED',
+      payload: {
+        task_id: req.params.id,
+        deadline: newDeadline.toISOString(),
+        status: 'OPEN',
+        reopened_by: req.user.full_name || req.user.role
+      }
+    });
 
     // Return instant success response to client (< 50ms)
     res.json({ success: true, deadline: newDeadline.toISOString(), status: 'OPEN' });
@@ -4972,6 +4996,17 @@ async function startServer() {
     invalidateApiCache('submissions_');
     invalidateApiCache('notifs_');
 
+    broadcastTaskEvent({
+      type: 'SUBMISSIONS_BATCH_VERIFIED',
+      payload: {
+        submission_ids,
+        status: 'VERIFIED',
+        verification_note: note,
+        verified_at: new Date().toISOString(),
+        verified_by_id: req.user.id
+      }
+    });
+
     // Respond immediately to the client (< 35ms)
     res.json({ success: true, count: submission_ids.length });
 
@@ -5110,6 +5145,20 @@ async function startServer() {
     invalidateApiCache('tasks_');
     invalidateApiCache('submissions_');
     invalidateApiCache('notifs_');
+
+    broadcastTaskEvent({
+      type: 'SUBMISSION_VERIFIED',
+      payload: {
+        submission_id: req.params.id,
+        task_id: sub.task_id,
+        user_id: sub.user_id,
+        status,
+        verification_note: verification_note || null,
+        rejection_reason: rejection_reason || null,
+        verified_at: new Date().toISOString(),
+        verified_by_id: req.user.id
+      }
+    });
 
     // Instant HTTP response back to user (< 30ms)
     res.json({ success: true, status });
