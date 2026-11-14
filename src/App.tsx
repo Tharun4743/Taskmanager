@@ -14751,7 +14751,7 @@ export default function App() {
                   <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs space-y-0.5">
                     <p className="font-extrabold text-emerald-900 uppercase text-[10px] tracking-wider">Verification Note</p>
                     <p className="text-emerald-800 font-medium">"{inspectingSubmission.verification_note}"</p>
-                    {inspectingSubmission.verified_at && (
+                    {inspectingSubmission.status === 'VERIFIED' && inspectingSubmission.verified_at && (
                       <p className="text-[10px] text-emerald-600 pt-1">Verified on {new Date(inspectingSubmission.verified_at).toLocaleDateString()}</p>
                     )}
                   </div>
@@ -19206,7 +19206,7 @@ export default function App() {
                                         {sub.status === 'NOT_PARTICIPATING' ? 'NOT INTERESTED' : sub.status}
                                       </Badge>
                                     </div>
-                                    {sub.verified_at && (
+                                    {sub.status === 'VERIFIED' && sub.verified_at && (
                                       <p className="text-xs text-zinc-400 mt-2 uppercase font-bold">
                                         Verified on {new Date(sub.verified_at).toLocaleString()}
                                       </p>

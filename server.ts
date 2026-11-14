@@ -396,6 +396,10 @@ export function broadcastTaskEvent(event: { type: string; payload?: any }) {
   const payloadString = `data: ${JSON.stringify(event)}\n\n`;
   for (const [id, client] of sseClients.entries()) {
     try {
+      if (client.res.writableEnded || client.res.destroyed) {
+        sseClients.delete(id);
+        continue;
+      }
       client.res.write(payloadString);
       if (typeof (client.res as any).flush === 'function') {
         (client.res as any).flush();
@@ -1235,8 +1239,10 @@ async function startServer() {
 
     req.on('close', cleanup);
     req.on('end', cleanup);
+    req.on('error', cleanup);
     res.on('finish', cleanup);
     res.on('close', cleanup);
+    res.on('error', cleanup);
   });
 
   // ── Telegram Bot Notification Endpoints ─────────────────────────────────────
@@ -5093,7 +5099,7 @@ async function startServer() {
         submission_ids,
         status: 'VERIFIED',
         verification_note: note,
-        verified_at: new Date().toISOString(),
+        verified_at: status === 'VERIFIED' ? new Date().toISOString() : null,
         verified_by_id: req.user.id
       }
     });
@@ -5200,7 +5206,7 @@ async function startServer() {
         SET status = $1,
             verification_note = $2,
             rejection_reason = $3,
-            verified_at = NOW(),
+            verified_at = CASE WHEN $1 = 'VERIFIED' THEN NOW() ELSE NULL END,
             verified_by_id = $5,
             updated_at = NOW()
         WHERE id = $4
@@ -5246,7 +5252,7 @@ async function startServer() {
         status,
         verification_note: verification_note || null,
         rejection_reason: rejection_reason || null,
-        verified_at: new Date().toISOString(),
+        verified_at: status === 'VERIFIED' ? new Date().toISOString() : null,
         verified_by_id: req.user.id
       }
     });
