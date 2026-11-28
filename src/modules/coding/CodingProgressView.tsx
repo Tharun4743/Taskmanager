@@ -53,6 +53,7 @@ export function CodingProgressView({
   const [selectedStudentHistory, setSelectedStudentHistory] = useState<any>(null);
   const [studentHistoryData, setStudentHistoryData] = useState<any>(null);
   const [syncingLeetcode, setSyncingLeetcode] = useState(false);
+  const [loadingLeetcode, setLoadingLeetcode] = useState(true);
   const [submittingTarget, setSubmittingTarget] = useState(false);
 
   const [leetcodeDate, setLeetcodeDate] = useState<string>(new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().split('T')[0]);
@@ -60,7 +61,12 @@ export function CodingProgressView({
   const [leetcodeSearch, setLeetcodeSearch] = useState<string>('');
   const [leetcodeViewType, setLeetcodeViewType] = useState<'DAILY' | 'WEEKLY'>('DAILY');
   const [leetcodeActiveTab, setLeetcodeActiveTab] = useState<'MONITOR' | 'TARGETS'>('MONITOR');
-  const [selectedLeetcodeDeptId, setSelectedLeetcodeDeptId] = useState<string>('ALL');
+  const [selectedLeetcodeDeptId, setSelectedLeetcodeDeptId] = useState<string>(() => {
+    if (user && user.role !== 'SUPREME_ADMIN' && user.department_id) {
+      return user.department_id.toString();
+    }
+    return 'ALL';
+  });
   const [selectedLeetcodeYear, setSelectedLeetcodeYear] = useState<string>('ALL');
   const [selectedLeetcodeClassId, setSelectedLeetcodeClassId] = useState<string>('ALL');
   const [leetcodeSortColumn, setLeetcodeSortColumn] = useState<string>('registerNumber');
@@ -89,13 +95,14 @@ export function CodingProgressView({
         
       }
     }
-  }, [user, classes]);
+  }, [user?.id, user?.role, user?.department_id, user?.class_id, user?.is_coordinator, classes.length]);
 
   // GitHub & Combined Progress Tracking State
   const [codingPlatformTab, setCodingPlatformTab] = useState<'LEETCODE' | 'GITHUB'>(() => (typeof window !== 'undefined' ? 'LEETCODE' : 'LEETCODE'));
   const [myGithubProgress, setMyGithubProgress] = useState<any>(null);
   const [githubStats, setGithubStats] = useState<any>(null);
   const [githubProgressList, setGithubProgressList] = useState<any[]>([]);
+  const [loadingGithub, setLoadingGithub] = useState(false);
   const [combinedProgressList, setCombinedProgressList] = useState<any[]>([]);
   const [syncingGithub, setSyncingGithub] = useState(false);
 
@@ -388,13 +395,19 @@ export function CodingProgressView({
   const leetcodeProgressRequestId = React.useRef(0);
   const leetcodeAbortControllerRef = React.useRef<AbortController | null>(null);
 
-  const fetchLeetcodeProgress = async () => {
+  const fetchLeetcodeProgress = async (forceRefresh = false) => {
+    const scopeKey = `${selectedLeetcodeDeptId}|${leetcodeDate}`;
+    if (!forceRefresh && fetchedLeetcodeKeyRef.current === scopeKey && leetcodeProgressList.length > 0) {
+      setLoadingLeetcode(false);
+      return;
+    }
     const requestId = ++leetcodeProgressRequestId.current;
     if (leetcodeAbortControllerRef.current) {
       leetcodeAbortControllerRef.current.abort();
     }
     const controller = new AbortController();
     leetcodeAbortControllerRef.current = controller;
+    setLoadingLeetcode(true);
 
     try {
       const endpoint = leetcodeViewType === 'DAILY' ? 'daily' : 'weekly';
@@ -409,6 +422,7 @@ export function CodingProgressView({
       if (res.ok) {
         const data = await res.json();
         if (requestId === leetcodeProgressRequestId.current && !controller.signal.aborted) {
+          fetchedLeetcodeKeyRef.current = scopeKey;
           setLeetcodeProgressList(data);
         }
       }
@@ -416,6 +430,10 @@ export function CodingProgressView({
       if (err?.name === 'AbortError') return;
       if (requestId === leetcodeProgressRequestId.current) {
         console.error('Error fetching LeetCode progress:', err);
+      }
+    } finally {
+      if (requestId === leetcodeProgressRequestId.current && !controller.signal.aborted) {
+        setLoadingLeetcode(false);
       }
     }
   };
@@ -516,14 +534,21 @@ export function CodingProgressView({
   // Track the latest GitHub progress request and AbortController to discard stale or cancelled responses
   const githubProgressRequestId = React.useRef(0);
   const githubAbortControllerRef = React.useRef<AbortController | null>(null);
+  const fetchedGithubKeyRef = React.useRef<string>('');
+  const fetchedLeetcodeKeyRef = React.useRef<string>('');
 
-  const fetchGithubProgress = async () => {
+  const fetchGithubProgress = async (forceRefresh = false) => {
+    const scopeKey = `${selectedLeetcodeDeptId}|${leetcodeDate}`;
+    if (!forceRefresh && fetchedGithubKeyRef.current === scopeKey && githubProgressList.length > 0) {
+      return;
+    }
     const requestId = ++githubProgressRequestId.current;
     if (githubAbortControllerRef.current) {
       githubAbortControllerRef.current.abort();
     }
     const controller = new AbortController();
     githubAbortControllerRef.current = controller;
+    setLoadingGithub(true);
 
     try {
       const deptParam = selectedLeetcodeDeptId !== 'ALL' ? `&departmentId=${selectedLeetcodeDeptId}` : '';
@@ -536,6 +561,7 @@ export function CodingProgressView({
       if (res.ok) {
         const data = await res.json();
         if (requestId === githubProgressRequestId.current && !controller.signal.aborted) {
+          fetchedGithubKeyRef.current = scopeKey;
           setGithubProgressList(data);
         }
       }
@@ -543,6 +569,10 @@ export function CodingProgressView({
       if (err?.name === 'AbortError') return;
       if (requestId === githubProgressRequestId.current) {
         console.error('Error fetching GitHub progress:', err);
+      }
+    } finally {
+      if (requestId === githubProgressRequestId.current && !controller.signal.aborted) {
+        setLoadingGithub(false);
       }
     }
   };
@@ -571,9 +601,9 @@ export function CodingProgressView({
       });
       if (res.ok) {
         addToast('LeetCode target deleted successfully', 'success');
+        fetchedLeetcodeKeyRef.current = '';
         fetchLeetcodeTargets();
-        fetchLeetcodeProgress();
-        fetchLeetcodeStats();
+        fetchLeetcodeProgress(true);
       } else {
         const data = await res.json();
         addToast(data.error || 'Failed to delete LeetCode target', 'error');
@@ -584,20 +614,25 @@ export function CodingProgressView({
   };
 
 
-  // Initial fetch on mount or token/tab change
+  // Initial fetch on mount or token/role/dept/date/tab change (avoids duplicate requests & hidden-tab loads)
   useEffect(() => {
-    if (!token) return;
-    if (user?.role === 'STUDENT' && !user?.is_coordinator) {
+    if (!token || !user?.role) return;
+    if (user.role === 'STUDENT' && !user.is_coordinator) {
+      setLoadingLeetcode(false);
       fetchMyLeetcodeProgress();
-      fetchMyGithubProgress();
+      if (codingPlatformTab === 'GITHUB' && !myGithubProgress) {
+        fetchMyGithubProgress();
+      }
     } else {
-      fetchLeetcodeStats();
       fetchLeetcodeProgress();
-      fetchLeetcodeTargets();
-      fetchGithubStats();
-      fetchGithubProgress();
+      if (leetcodeTargets.length === 0) {
+        fetchLeetcodeTargets();
+      }
+      if (codingPlatformTab === 'GITHUB') {
+        fetchGithubProgress();
+      }
     }
-  }, [token, user, selectedLeetcodeDeptId, selectedLeetcodeYear, selectedLeetcodeClassId, leetcodeDate, codingPlatformTab]);
+  }, [token, user?.id, user?.role, user?.is_coordinator, selectedLeetcodeDeptId, leetcodeDate, codingPlatformTab]);
 
   // ── Action Handlers ──
   const handleSyncGithubProgress = async () => {
@@ -614,8 +649,8 @@ export function CodingProgressView({
       if (res.ok) {
         const data = await res.json();
         addToast(data.message || 'GitHub daily commits sync completed', 'success');
-        fetchGithubProgress();
-        fetchGithubStats();
+        fetchedGithubKeyRef.current = '';
+        fetchGithubProgress(true);
         fetchCombinedProgress();
       } else {
         addToast('Failed to sync GitHub daily commits', 'error');
@@ -707,9 +742,9 @@ export function CodingProgressView({
       if (res.ok) {
         addToast('LeetCode target created successfully', 'success');
         setShowAssignTargetModal(false);
+        fetchedLeetcodeKeyRef.current = '';
         fetchLeetcodeTargets();
-        fetchLeetcodeProgress();
-        fetchLeetcodeStats();
+        fetchLeetcodeProgress(true);
       } else {
         const data = await res.json();
         addToast(data.error || 'Failed to create LeetCode target', 'error');
@@ -735,8 +770,8 @@ export function CodingProgressView({
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         addToast(data.message || 'LeetCode progress synchronized successfully', 'success');
-        await fetchLeetcodeProgress();
-        await fetchLeetcodeStats();
+        fetchedLeetcodeKeyRef.current = '';
+        await fetchLeetcodeProgress(true);
       } else {
         const data = await res.json().catch(() => ({}));
         addToast(data.error || 'Failed to start LeetCode sync', 'error');
@@ -1210,7 +1245,16 @@ export function CodingProgressView({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-200 text-sm">
-                      {sortedLeetcodeProgressList.length === 0 ? (
+                      {loadingLeetcode && sortedLeetcodeProgressList.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="px-6 py-12 text-center text-zinc-500 font-semibold">
+                            <span className="inline-flex items-center gap-2">
+                              <Loader2 size={16} className="animate-spin text-orange-500" />
+                              Loading LeetCode student progress...
+                            </span>
+                          </td>
+                        </tr>
+                      ) : sortedLeetcodeProgressList.length === 0 ? (
                         <tr>
                           <td colSpan={7} className="px-6 py-12 text-center text-zinc-400 font-semibold">
                             No LeetCode student records match the selected filters.
@@ -1576,7 +1620,16 @@ export function CodingProgressView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 text-sm">
-                    {sortedGithubProgressList.length === 0 ? (
+                    {loadingGithub && sortedGithubProgressList.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-6 py-12 text-center text-zinc-500 font-semibold">
+                          <span className="inline-flex items-center gap-2">
+                            <Loader2 size={16} className="animate-spin text-indigo-500" />
+                            Loading GitHub student commits...
+                          </span>
+                        </td>
+                      </tr>
+                    ) : sortedGithubProgressList.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="px-6 py-12 text-center text-zinc-400 font-semibold">
                           No GitHub student records match the selected filters.

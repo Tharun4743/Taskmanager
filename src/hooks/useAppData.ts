@@ -494,35 +494,77 @@ export function useAppData() {
       }
       if (bootRes.ok) {
         const bData = await bootRes.json();
-        if (bData.departments) setDepartments(bData.departments);
-        if (bData.classes) setClasses(bData.classes);
-        if (bData.users) setUsers(bData.users);
-        if (bData.tasks) setTasks(bData.tasks);
-        if (bData.submissions) setSubmissions(bData.submissions);
+        if (bData.departments) {
+          setDepartments(bData.departments);
+          try { sessionStorage.setItem('app_cache_depts', JSON.stringify(bData.departments)); } catch {}
+        }
+        if (bData.classes) {
+          setClasses(bData.classes);
+          try { sessionStorage.setItem('app_cache_classes', JSON.stringify(bData.classes)); } catch {}
+        }
+        if (bData.users) {
+          setUsers(bData.users);
+          try { sessionStorage.setItem('app_cache_users', JSON.stringify(bData.users)); } catch {}
+        }
+        if (bData.tasks) {
+          setTasks(bData.tasks);
+          try { sessionStorage.setItem('app_cache_tasks', JSON.stringify(bData.tasks)); } catch {}
+        }
+        if (bData.submissions) {
+          setSubmissions(bData.submissions);
+          try { sessionStorage.setItem('app_cache_submissions', JSON.stringify(bData.submissions)); } catch {}
+        }
+        if (Array.isArray(bData.notifications)) {
+          setNotifications(bData.notifications);
+          try { sessionStorage.setItem('app_cache_notifs', JSON.stringify(bData.notifications)); } catch {}
+        } else {
+          fetchNotifications();
+        }
+        if (Array.isArray(bData.notices)) {
+          setNotices(bData.notices);
+        } else {
+          fetchNotices();
+        }
+        if (bData.myClass !== undefined) {
+          setMyClass(bData.myClass);
+        }
         if (bData.user) {
-          setUser(bData.user);
-          localStorage.setItem('user', JSON.stringify(bData.user));
+          const nextUserJson = JSON.stringify(bData.user);
+          try { localStorage.setItem('user', nextUserJson); } catch {}
+          setUser(prev => {
+            if (!prev) return bData.user;
+            try { return JSON.stringify(prev) === nextUserJson ? prev : bData.user; } catch { return bData.user; }
+          });
+
           const role = bData.user.role;
           if (role === 'SUPREME_ADMIN') {
-            fetchSupremeStats(activeToken);
+            if (bData.stats) setSupremeStats(bData.stats);
+            else fetchSupremeStats(activeToken);
             fetchIndustryData(activeToken);
             fetchTeamSubmissions(activeToken);
           } else if (role === 'HOD') {
-            fetchHODStats(activeToken);
+            if (bData.stats) setHodStats(bData.stats);
+            else fetchHODStats(activeToken);
             fetchIndustryData(activeToken);
             fetchTeamSubmissions(activeToken);
           } else if (role === 'CLASS_ADVISOR' || role === 'FACULTY' || role === 'STAFF') {
-            fetchAdvisorStats(activeToken);
-            fetchMyClass(activeToken);
+            if (bData.stats) setAdvisorStats(bData.stats);
+            else fetchAdvisorStats(activeToken);
+            if (bData.myClass === undefined) fetchMyClass(activeToken);
             fetchTeamSubmissions(activeToken);
           } else if (role === 'STUDENT') {
-            fetchStudentStats(activeToken);
-            fetchMyLeetcodeProgress(activeToken);
-            fetchMyTeamsAndInvitations();
+            if (Array.isArray(bData.teams)) setMyTeams(bData.teams);
+            if (Array.isArray(bData.invitations)) setMyInvitations(bData.invitations);
             if (bData.user.is_coordinator) {
-              fetchCoordinatorStats(activeToken);
+              if (bData.stats) setCoordinatorStats(bData.stats);
+              else fetchCoordinatorStats(activeToken);
+              fetchStudentStats(activeToken);
               fetchTeamSubmissions(activeToken);
+            } else {
+              if (bData.stats) setStudentStats(bData.stats);
+              else fetchStudentStats(activeToken);
             }
+            fetchMyLeetcodeProgress(activeToken);
           }
         }
       }
@@ -533,17 +575,14 @@ export function useAppData() {
     }
   }, [token]);
 
-  // Bootstrap trigger on mount / login
+  // Bootstrap trigger on mount / login (single round-trip via /api/bootstrap)
   useEffect(() => {
     if (token) {
       fetchInitialData();
-      fetchNotices();
-      fetchNotifications();
-      fetchMyTeamsAndInvitations();
     } else {
       setIsLoading(false);
     }
-  }, [token, fetchInitialData, fetchNotices, fetchNotifications, fetchMyTeamsAndInvitations]);
+  }, [token, fetchInitialData]);
 
   // Logout handler
   const handleLogout = useCallback(() => {

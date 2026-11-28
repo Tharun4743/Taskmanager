@@ -338,6 +338,130 @@ try {
   testsFailed++;
 }
 
+// ============================================================================
+// TEST GROUP 6: PERFORMANCE & LOADING OPTIMIZATION REGRESSION GATES
+// ============================================================================
+console.log('\n--- TEST GROUP 6: Performance & Query Optimization Gates ---');
+try {
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.ts'), 'utf8');
+  const vercelCfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vercel.json'), 'utf8'));
+  const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.ts'), 'utf8');
+  const useAppDataSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'hooks', 'useAppData.ts'), 'utf8');
+  const codingViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'coding', 'CodingProgressView.tsx'), 'utf8');
+
+  assert(
+    Array.isArray(vercelCfg.regions) && vercelCfg.regions.includes('sin1') && !vercelCfg.regions.includes('bom1'),
+    'vercel.json colocates compute in sin1 (Singapore) alongside ap-southeast-1 Supabase'
+  );
+
+  // db.ts fast path skips sequential DDL roundtrips when schema already verified
+  const fastPathMatch = dbSource.match(/if\s*\(count\s*>=\s*5\)\s*\{([\s\S]*?)hasVerifiedDBSchema\s*=\s*true;\s*return;\s*\}/);
+  assert(
+    Boolean(fastPathMatch) && !/fastMigrations/.test(fastPathMatch[1]),
+    'db.ts initDB fast path skips sequential DDL fastMigrations on cold starts'
+  );
+
+  // server.ts single-query authenticate join + INDUSTRY_GUEST approval enforcement
+  const authSlice = serverSource.slice(
+    serverSource.indexOf('const authCached = userAuthCache.get'),
+    serverSource.indexOf('req.user = {')
+  );
+  assert(
+    /LEFT JOIN company_profiles cp ON cp\.user_id = u\.id/.test(authSlice) &&
+    /user\.role === 'INDUSTRY' \|\| user\.role === 'INDUSTRY_GUEST'/.test(authSlice) &&
+    /!user\.company_is_verified/.test(authSlice),
+    'server.ts authenticate merges company_profiles verification into single cached query and enforces INDUSTRY_GUEST'
+  );
+
+  // server.ts /api/bootstrap includes notices & myClass via shared getNoticesForUser helper
+  assert(
+    /async function getNoticesForUser/.test(serverSource) &&
+    /app\.get\('\/api\/bootstrap'[\s\S]*getNoticesForUser\(dbUser\)[\s\S]*notices:\s*notices\s*\|\|\s*\[\][\s\S]*myClass/.test(serverSource),
+    'server.ts /api/bootstrap hydrates notices and myClass via shared cached helper'
+  );
+
+  // server.ts coding endpoints share 30s batch caches and /api/github/stats avoids extra weeklyAgg query
+  const lcDailySlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/leetcode/progress/daily'"),
+    serverSource.indexOf("app.get('/api/leetcode/progress/weekly'")
+  );
+  const ghStatsSlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/github/stats'"),
+    serverSource.indexOf("app.post(['/api/github/sync/my'")
+  );
+  assert(
+    /async function getEnrichedLeetcodeCached/.test(serverSource) &&
+    /async function getEnrichedGithubCached/.test(serverSource) &&
+    /getEnrichedLeetcodeCached\(scope,\s*dateStr\)/.test(lcDailySlice) &&
+    /getApiCache\(cacheKey\)/.test(ghStatsSlice) &&
+    /getEnrichedGithubCached\(scope,\s*dateStr\)/.test(ghStatsSlice) &&
+    !/weeklyAgg/.test(ghStatsSlice),
+    'server.ts LeetCode and GitHub endpoints share cached batch helpers without redundant weeklyAgg SQL query'
+  );
+
+  // server.ts /api/assessment/my-results uses cached active bank lookup instead of per-row Promise.all(enrichAssessmentRow)
+  const myResultsSlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/assessment/my-results'"),
+    serverSource.indexOf("app.get('/api/assessment/remedial-plan'")
+  );
+  assert(
+    /assessment_questions_active_all/.test(myResultsSlice) && !/enrichAssessmentRow/.test(myResultsSlice),
+    'server.ts /api/assessment/my-results reconstructs summaries in batch instead of N+1 Promise.all'
+  );
+
+  // server.ts /api/placement/readiness-dashboard fetches scoped students first and filters metrics via ANY($1)
+  const readinessSlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/placement/readiness-dashboard'"),
+    serverSource.indexOf("app.get('/api/placement/my-readiness'")
+  );
+  assert(
+    /if\s*\(studentsRes\.rows\.length\s*===\s*0\)/.test(readinessSlice) &&
+    /FROM student_assessments[\s\S]{0,120}WHERE user_id = ANY\(\$1(?:::uuid\[\])?\)/.test(readinessSlice) &&
+    /FROM task_submissions[\s\S]{0,120}WHERE user_id = ANY\(\$1(?:::uuid\[\])?\)/.test(readinessSlice),
+    'server.ts /api/placement/readiness-dashboard scopes all 6 metric queries to filtered studentIds'
+  );
+
+  // server.ts /api/industry/postings/:id/ranking batches skills & metrics without N+1 loop
+  const rankingSlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/industry/postings/:id/ranking'"),
+    serverSource.indexOf("app.post('/api/postings/:id/apply'")
+  );
+  assert(
+    /industry_posting_ranking_/.test(rankingSlice) &&
+    !/Promise\.all\(studentsRes\.rows\.map/.test(rankingSlice) &&
+    /WHERE user_id = ANY\(\$1::uuid\[\]\)/.test(rankingSlice),
+    'server.ts /api/industry/postings/:id/ranking eliminates N+1 student queries via bulk ANY($1) lookups + cache'
+  );
+
+  // Frontend useAppData.ts hydrates stats/notices/notifications/myClass from bootstrap without duplicate mount calls
+  const bootstrapEffect = useAppDataSource.slice(
+    useAppDataSource.indexOf('// Bootstrap trigger on mount'),
+    useAppDataSource.indexOf('// Logout handler')
+  );
+  assert(
+    /setSupremeStats\(bData\.stats\)/.test(useAppDataSource) &&
+    /setHodStats\(bData\.stats\)/.test(useAppDataSource) &&
+    /setNotices\(bData\.notices\)/.test(useAppDataSource) &&
+    !/fetchNotices\(\)/.test(bootstrapEffect) &&
+    !/fetchNotifications\(\)/.test(bootstrapEffect),
+    'src/hooks/useAppData.ts consumes bootstrap payload directly without duplicate startup fetches'
+  );
+
+  // Frontend CodingProgressView.tsx exposes loading indicators & avoids client-filter refetch storm
+  const codingEffectMatch = codingViewSource.match(/if\s*\(!token\s*\|\|\s*!user\?\.role\)\s*return;[\s\S]*?\},\s*\[(.*?)\]\);/);
+  assert(
+    Boolean(codingEffectMatch) &&
+    !/selectedLeetcodeYear|selectedLeetcodeClassId/.test(codingEffectMatch[1]) &&
+    /codingPlatformTab === 'GITHUB'[\s\S]{0,80}fetchGithubProgress/.test(codingEffectMatch[0]) &&
+    /loadingLeetcode && sortedLeetcodeProgressList\.length === 0/.test(codingViewSource) &&
+    /loadingGithub && sortedGithubProgressList\.length === 0/.test(codingViewSource),
+    'src/modules/coding/CodingProgressView.tsx avoids client-filter refetches, lazy-loads GitHub tab, and shows loading rows'
+  );
+} catch (err) {
+  console.error('  [ERROR] Group 6 failed:', err);
+  testsFailed++;
+}
+
 console.log('\n==============================================================');
 console.log(`TOTAL TESTS: ${testsPassed + testsFailed} | PASSED: ${testsPassed} | FAILED: ${testsFailed}`);
 console.log('==============================================================');

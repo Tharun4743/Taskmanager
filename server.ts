@@ -1178,7 +1178,10 @@ async function startServer() {
         user = authCached.user;
       } else {
         const dbUserRes = await pool.query(
-          'SELECT * FROM users WHERE id = $1 LIMIT 1',
+          `SELECT u.*, cp.is_verified AS company_is_verified
+           FROM users u
+           LEFT JOIN company_profiles cp ON cp.user_id = u.id
+           WHERE u.id = $1 LIMIT 1`,
           [userId]
         );
         user = dbUserRes.rows[0];
@@ -1189,13 +1192,9 @@ async function startServer() {
         return res.status(401).json({ error: 'Unauthorized: User not found' });
       }
 
-      // Enforce Supreme Admin approval for INDUSTRY role accounts
-      if (user.role === 'INDUSTRY') {
-        const cpRes = await pool.query(
-          'SELECT is_verified FROM company_profiles WHERE user_id = $1 LIMIT 1',
-          [user.id]
-        );
-        if (!cpRes.rows[0]?.is_verified) {
+      // Enforce Supreme Admin approval for INDUSTRY / INDUSTRY_GUEST accounts using cached join field
+      if (user.role === 'INDUSTRY' || user.role === 'INDUSTRY_GUEST') {
+        if (!user.company_is_verified) {
           return res.status(403).json({ error: 'Your HR / Industry account is pending approval from Supreme Admin.' });
         }
       }
@@ -6242,6 +6241,58 @@ async function startServer() {
     res.json({ tasks, submissions, notifications });
   });
 
+  async function getNoticesForUser(u: any, filters: { search?: string; priority?: string; scope?: string } = {}) {
+    const { search, priority, scope: scopeFilter } = filters;
+    const cacheKey = `notices_${u.role}_${u.department_id || 'all'}_${u.class_id || 'all'}_${search || ''}_${priority || ''}_${scopeFilter || ''}`;
+    const cached = getApiCache(cacheKey);
+    if (cached) return cached;
+
+    const params: any[] = [];
+    const conditions: string[] = [
+      `(n.expire_at IS NULL OR n.expire_at > NOW())`,
+      `n.publish_at <= NOW()`,
+    ];
+
+    if (u.role === 'SUPREME_ADMIN') {
+      // sees everything
+    } else if (u.role === 'HOD') {
+      params.push(u.department_id);
+      conditions.push(
+        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length}) OR n.scope='YEAR' OR (n.scope='CLASS' AND (n.department_id=$${params.length} OR c.department_id=$${params.length})))`
+      );
+    } else if (u.role === 'CLASS_ADVISOR') {
+      params.push(u.department_id, u.class_id);
+      conditions.push(
+        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length - 1}) OR n.scope='YEAR' OR (n.scope='CLASS' AND (n.class_id=$${params.length} OR n.department_id=$${params.length - 1})))`
+      );
+    } else {
+      params.push(u.department_id, u.class_id);
+      conditions.push(
+        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length - 1}) OR (n.scope='YEAR' AND (n.year IS NULL OR n.year = (SELECT year FROM classes WHERE id=$${params.length}))) OR (n.scope='CLASS' AND n.class_id=$${params.length}))`
+      );
+    }
+
+    if (search) { params.push(`%${search}%`); conditions.push(`(n.title ILIKE $${params.length} OR n.description ILIKE $${params.length})`); }
+    if (priority) { params.push(priority); conditions.push(`n.priority=$${params.length}`); }
+    if (scopeFilter) { params.push(scopeFilter); conditions.push(`n.scope=$${params.length}`); }
+
+    const result = await pool.query(`
+      SELECT n.*, u.full_name AS creator_name, u.role AS creator_role,
+        d.name AS department_name, c.name AS class_name
+      FROM notices n
+      JOIN users u ON n.created_by = u.id
+      LEFT JOIN departments d ON n.department_id = d.id
+      LEFT JOIN classes c ON n.class_id = c.id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY n.is_pinned DESC,
+        CASE n.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END,
+        n.created_at DESC
+    `, params);
+
+    setApiCache(cacheKey, result.rows, 15);
+    return result.rows;
+  }
+
   // ── High-Performance Bootstrap Endpoint (Single Round-Trip Initial Load) ───
   app.get('/api/bootstrap', authenticate, async (req: any, res: Response) => {
     try {
@@ -6367,7 +6418,7 @@ async function startServer() {
         }, 60);
       };
 
-      const [departments, classes, tasks, submissions, notifications, roleStats, roleTeams, users] = await Promise.all([
+      const [departments, classes, tasks, submissions, notifications, notices, roleStats, roleTeams, users] = await Promise.all([
         getCachedOrQuery('departments_all', async () => {
           const r = await pool.query('SELECT id, name, created_at FROM departments ORDER BY created_at ASC');
           return r.rows.map((d: any) => ({ id: d.id, name: d.name, created_at: d.created_at }));
@@ -6378,11 +6429,21 @@ async function startServer() {
         }, 60),
         getCachedOrQuery(tasksCacheKey, () => getTasksDataForUser(dbUser), 45),
         getCachedOrQuery(subsCacheKey, () => getSubmissionsDataForUser(dbUser), 45),
-        pool.query('SELECT id, message, type, title, is_read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50', [dbUser.id]).then(r => r.rows.map((n: any) => ({ id: n.id, message: n.message, type: n.type, title: n.title, is_read: n.is_read, created_at: n.created_at }))),
+        getCachedOrQuery(`notifs_${dbUser.id}`, () =>
+          pool.query('SELECT id, message, type, title, is_read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50', [dbUser.id])
+            .then(r => r.rows.map((n: any) => ({ id: n.id, message: n.message, type: n.type, title: n.title, is_read: n.is_read, created_at: n.created_at }))),
+          8
+        ),
+        getNoticesForUser(dbUser).catch(() => []),
         fetchRoleStats(),
         fetchRoleTeams(),
         fetchUsers()
       ]);
+
+      const matchedClass = dbUser.class_id ? classes.find((c: any) => String(c.id) === String(dbUser.class_id)) : null;
+      const myClass = matchedClass
+        ? { id: matchedClass.id, name: matchedClass.name, year: matchedClass.year, batch: matchedClass.batch, department_id: matchedClass.department_id }
+        : null;
 
       res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
       res.json({
@@ -6412,6 +6473,8 @@ async function startServer() {
         tasks,
         submissions,
         notifications,
+        notices: notices || [],
+        myClass,
         stats: roleStats,
         teams: roleTeams?.teams || [],
         invitations: roleTeams?.invitations || []
@@ -7536,59 +7599,10 @@ async function startServer() {
   // MODULE 2 â€” DIGITAL NOTICE BOARD
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-  // GET /api/notices — fetch notices visible to the current user
+  // GET /api/notices — fetch notices visible to the current user (shares cache with /api/bootstrap)
   app.get('/api/notices', authenticate, asyncHandler(async (req: any, res: Response) => {
-    const u = req.user;
-    const { search, priority, scope: scopeFilter } = req.query as any;
-
-    const cacheKey = `notices_${u.role}_${u.department_id || 'all'}_${u.class_id || 'all'}_${search || ''}_${priority || ''}_${scopeFilter || ''}`;
-    const cached = getApiCache(cacheKey);
-    if (cached) return res.json(cached);
-
-    const params: any[] = [];
-    const conditions: string[] = [
-      `(n.expire_at IS NULL OR n.expire_at > NOW())`,
-      `n.publish_at <= NOW()`,
-    ];
-
-    if (u.role === 'SUPREME_ADMIN') {
-      // sees everything
-    } else if (u.role === 'HOD') {
-      params.push(u.department_id);
-      conditions.push(
-        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length}) OR n.scope='YEAR' OR (n.scope='CLASS' AND (n.department_id=$${params.length} OR c.department_id=$${params.length})))`
-      );
-    } else if (u.role === 'CLASS_ADVISOR') {
-      params.push(u.department_id, u.class_id);
-      conditions.push(
-        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length - 1}) OR n.scope='YEAR' OR (n.scope='CLASS' AND (n.class_id=$${params.length} OR n.department_id=$${params.length - 1})))`
-      );
-    } else {
-      params.push(u.department_id, u.class_id);
-      conditions.push(
-        `(n.scope='ALL' OR (n.scope='DEPARTMENT' AND n.department_id=$${params.length - 1}) OR (n.scope='YEAR' AND (n.year IS NULL OR n.year = (SELECT year FROM classes WHERE id=$${params.length}))) OR (n.scope='CLASS' AND n.class_id=$${params.length}))`
-      );
-    }
-
-    if (search) { params.push(`%${search}%`); conditions.push(`(n.title ILIKE $${params.length} OR n.description ILIKE $${params.length})`); }
-    if (priority) { params.push(priority); conditions.push(`n.priority=$${params.length}`); }
-    if (scopeFilter) { params.push(scopeFilter); conditions.push(`n.scope=$${params.length}`); }
-
-    const result = await pool.query(`
-      SELECT n.*, u.full_name AS creator_name, u.role AS creator_role,
-        d.name AS department_name, c.name AS class_name
-      FROM notices n
-      JOIN users u ON n.created_by = u.id
-      LEFT JOIN departments d ON n.department_id = d.id
-      LEFT JOIN classes c ON n.class_id = c.id
-      WHERE ${conditions.join(' AND ')}
-      ORDER BY n.is_pinned DESC,
-        CASE n.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END,
-        n.created_at DESC
-    `, params);
-
-    setApiCache(cacheKey, result.rows, 15);
-    res.json(result.rows);
+    const rows = await getNoticesForUser(req.user, req.query as any);
+    res.json(rows);
   }));
 
   // GET /api/notices/:id — fetch single notice detail
@@ -8351,6 +8365,9 @@ async function startServer() {
           await new Promise(res => setTimeout(res, 200));
         }
       }
+      invalidateApiCache('lc_batch_');
+      invalidateApiCache('leetcode_stats_');
+      invalidateApiCache('placement_readiness_');
       return { success: true, synced, failed, partial: !completedAll };
 
     } catch (err) {
@@ -8601,6 +8618,8 @@ async function startServer() {
       targetId = insertRes.rows[0].id;
     }
 
+    invalidateApiCache('lc_batch_');
+    invalidateApiCache('leetcode_stats_');
     recalculateProgressStatuses(startDate, endDate, { userId: userId || undefined, classId: classId || undefined, year: year || undefined, departmentId: departmentId || undefined }).catch(err => console.error(err));
     res.json({ success: true, targetId });
   }));
@@ -8619,6 +8638,8 @@ async function startServer() {
     }
 
     await pool.query('DELETE FROM leetcode_targets WHERE id = $1', [targetId]);
+    invalidateApiCache('lc_batch_');
+    invalidateApiCache('leetcode_stats_');
     recalculateProgressStatuses(
       new Date(t.start_date).toISOString().split('T')[0],
       new Date(t.end_date).toISOString().split('T')[0],
@@ -8837,6 +8858,27 @@ async function startServer() {
     });
   }
 
+  // Cached enriched cohort helpers (shared across stats, daily, weekly coding endpoints; 30s TTL)
+  async function getEnrichedLeetcodeCached(scope: { classId?: string; year?: number; departmentId?: string; batch?: string }, dateStr: string) {
+    const cacheKey = `lc_batch_${scope.departmentId || 'all'}_${scope.classId || 'all'}_${scope.year || 'all'}_${scope.batch || 'all'}_${dateStr}`;
+    const cached = getApiCache<any[]>(cacheKey);
+    if (cached) return cached;
+    const studentRows = await fetchStudentsForScope(scope);
+    const enrichedList = await enrichStudentProgressBatch(studentRows, dateStr);
+    setApiCache(cacheKey, enrichedList, 30);
+    return enrichedList;
+  }
+
+  async function getEnrichedGithubCached(scope: { classId?: string; year?: number; departmentId?: string; batch?: string }, dateStr: string) {
+    const cacheKey = `gh_batch_${scope.departmentId || 'all'}_${scope.classId || 'all'}_${scope.year || 'all'}_${scope.batch || 'all'}_${dateStr}`;
+    const cached = getApiCache<any[]>(cacheKey);
+    if (cached) return cached;
+    const studentRows = await fetchStudentsForScope(scope);
+    const enrichedList = await enrichStudentGitHubDailyCommitsBatch(studentRows, dateStr);
+    setApiCache(cacheKey, enrichedList, 30);
+    return enrichedList;
+  }
+
   // 5. Dashboard Summary Stats
   app.get('/api/leetcode/stats', authenticate, asyncHandler(async (req: any, res: Response) => {
     const scope = enforceUserScopeFilter(req.user, req.query);
@@ -8845,10 +8887,8 @@ async function startServer() {
     const cached = getApiCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentProgressBatch(studentRows, dateStr);
-
-    const totalStudents = studentRows.length;
+    const enrichedList = await getEnrichedLeetcodeCached(scope, dateStr);
+    const totalStudents = enrichedList.length;
     let metDaily = 0;
     let inProgressDaily = 0;
     let dailyCompleted = 0;
@@ -8938,8 +8978,7 @@ async function startServer() {
     const statusFilter = req.query.status ? req.query.status.toString() : 'ALL';
     const search = req.query.search ? req.query.search.toString().toLowerCase() : '';
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentProgressBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedLeetcodeCached(scope, dateStr);
 
     const filtered = enrichedList.filter(row => {
       if (search) {
@@ -8969,8 +9008,7 @@ async function startServer() {
     const statusFilter = req.query.status ? req.query.status.toString() : 'ALL';
     const search = req.query.search ? req.query.search.toString().toLowerCase() : '';
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentProgressBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedLeetcodeCached(scope, dateStr);
 
     const filtered = enrichedList.filter(row => {
       if (search) {
@@ -9598,6 +9636,9 @@ async function startServer() {
       }
 
       console.log(`[GitHub Daily Sync] Completed. Total: ${totalStudents}, Processed: ${processed}, Successful: ${successful}, Skipped: ${skipped}, Failed: ${failed}`);
+      invalidateApiCache('gh_batch_');
+      invalidateApiCache('github_stats_');
+      invalidateApiCache('placement_readiness_');
       return {
         total_students: totalStudents,
         processed,
@@ -9701,8 +9742,7 @@ async function startServer() {
     const search = req.query.search ? req.query.search.toString().toLowerCase() : '';
     const statusFilter = (req.query.statusFilter || req.query.status || 'ALL').toString();
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentGitHubDailyCommitsBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedGithubCached(scope, dateStr);
 
     const filtered = enrichedList.filter(row => {
       if (search) {
@@ -9742,8 +9782,7 @@ async function startServer() {
     const search = req.query.search ? req.query.search.toString().toLowerCase() : '';
     const statusFilter = (req.query.statusFilter || req.query.status || 'ALL').toString();
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentGitHubDailyCommitsBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedGithubCached(scope, dateStr);
 
     const filtered = enrichedList.filter(row => {
       if (search) {
@@ -9867,8 +9906,7 @@ async function startServer() {
     const dateStr = req.query.date ? req.query.date.toString() : getISTDateStr();
     const search = req.query.search ? req.query.search.toString().toLowerCase() : '';
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentGitHubDailyCommitsBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedGithubCached(scope, dateStr);
 
     const filtered = enrichedList.filter(row => {
       if (!search) return true;
@@ -9882,38 +9920,33 @@ async function startServer() {
   app.get('/api/github/stats', authenticate, asyncHandler(async (req: any, res: Response) => {
     const scope = enforceUserScopeFilter(req.user, req.query);
     const dateStr = req.query.date ? req.query.date.toString() : getISTDateStr();
+    const cacheKey = `github_stats_${JSON.stringify(scope)}_${dateStr}`;
+    const cached = getApiCache(cacheKey);
+    if (cached) return res.json(cached);
 
-    const studentRows = await fetchStudentsForScope(scope);
-    const enrichedList = await enrichStudentGitHubDailyCommitsBatch(studentRows, dateStr);
+    const enrichedList = await getEnrichedGithubCached(scope, dateStr);
 
-    const week = getWeekRange(dateStr);
-    const studentIds = studentRows.map(s => s.id);
-
-    const weeklyAgg = await pool.query(`
-      SELECT SUM(daily_commit_count) as total_commits
-      FROM github_daily_commits
-      WHERE student_id = ANY($1) AND date >= $2 AND date <= $3
-    `, [studentIds, week.start, week.end]);
-
-    const totalStudents = studentRows.length;
+    const totalStudents = enrichedList.length;
     let commitsToday = 0;
+    let commitsThisWeek = 0;
     let activeCommitters = 0;
     let syncedStudents = 0;
     let noGithubHandleCount = 0;
 
     for (const item of enrichedList) {
-      commitsToday += item.commitsToday;
+      commitsToday += item.commitsToday || 0;
+      commitsThisWeek += item.commitsThisWeek || 0;
       if (item.commitsToday > 0) activeCommitters++;
       if (item.syncStatus === 'SUCCESS') syncedStudents++;
       if (!item.githubUsername) noGithubHandleCount++;
     }
 
-    res.json({
+    const statsData = {
       totalStudents,
       syncedStudents,
       activeCommitters,
       commitsToday,
-      commitsThisWeek: Number(weeklyAgg.rows[0]?.total_commits) || 0,
+      commitsThisWeek,
       noGithubHandleCount,
       failedSyncCount: Math.max(0, totalStudents - syncedStudents - noGithubHandleCount),
       // Forward-compatible aliases for existing dashboard cards
@@ -9926,7 +9959,9 @@ async function startServer() {
       dailyNotCompleted: totalStudents - activeCommitters,
       weeklyCompleted: activeCommitters,
       weeklyNotCompleted: totalStudents - activeCommitters
-    });
+    };
+    setApiCache(cacheKey, statsData, 30);
+    res.json(statsData);
   }));
 
   // 7. Student Self-Service GitHub Sync (Student syncs their own profile)
@@ -11409,8 +11444,59 @@ async function startServer() {
       highestScore = Math.round(Math.max(...result.rows.map(r => Number(r.score_percentage || 0))) * 100) / 100;
     }
 
-    // ── Reconstruct incomplete answers_summary from question bank ────────────
-    const enrichedAssessments = await Promise.all(result.rows.map(row => enrichAssessmentRow(row)));
+    // ── Batch-reconstruct incomplete answers_summary using at most 1 cached question bank lookup ──
+    const needsReconstruction = result.rows.some((row: any) => {
+      const storedSummary: any[] = Array.isArray(row.answers_summary) ? row.answers_summary : [];
+      const expectedTotal = Number(row.total_questions) || 0;
+      return storedSummary.length < expectedTotal && expectedTotal > 0;
+    });
+
+    let enrichedAssessments = result.rows;
+    if (needsReconstruction) {
+      let allBankQuestions: any[] | null = getApiCache<any[]>('assessment_questions_active_all');
+      if (!allBankQuestions) {
+        const qRes = await pool.query(`SELECT * FROM assessment_questions WHERE is_active = TRUE ORDER BY created_at ASC;`);
+        allBankQuestions = qRes.rows;
+        setApiCache('assessment_questions_active_all', allBankQuestions, 120);
+      }
+      const questionsByTrack = new Map<string, any[]>();
+      for (const q of allBankQuestions) {
+        const key = q.track_type || 'GENERAL_APTITUDE';
+        const list = questionsByTrack.get(key) || [];
+        list.push(q);
+        questionsByTrack.set(key, list);
+      }
+      const fallbackQuestions = allBankQuestions.slice(0, 15);
+
+      enrichedAssessments = result.rows.map((row: any) => {
+        const storedSummary: any[] = Array.isArray(row.answers_summary) ? row.answers_summary : [];
+        const expectedTotal = Number(row.total_questions) || 0;
+        if (storedSummary.length >= expectedTotal && expectedTotal > 0) return row;
+
+        const trackQuestions = questionsByTrack.get(row.track_type || 'GENERAL_APTITUDE');
+        const allQuestions = trackQuestions && trackQuestions.length > 0 ? trackQuestions : fallbackQuestions;
+        const existingByQId: Record<string, any> = {};
+        for (const s of storedSummary) {
+          if (s.question_id) existingByQId[s.question_id] = s;
+        }
+        const reconstructed = allQuestions.slice(0, expectedTotal || allQuestions.length).map((q: any) => {
+          if (existingByQId[q.id]) return existingByQId[q.id];
+          return {
+            question_id: q.id,
+            question_text: q.question_text,
+            options: q.options,
+            selected_option: null,
+            correct_option: q.correct_option,
+            is_correct: false,
+            category: q.category,
+            skill_tag: q.skill_tag,
+            explanation: q.explanation,
+            _reconstructed: true
+          };
+        });
+        return { ...row, answers_summary: reconstructed };
+      });
+    }
 
     res.json({
       success: true,
@@ -11861,6 +11947,10 @@ async function startServer() {
     const isHOD = req.user.role === 'HOD';
     let { class_id, tier, search, department_id } = req.query;
 
+    const readinessCacheKey = `placement_readiness_${req.user.role}_${isAdvisor ? req.user.id : (req.user.department_id || 'all')}_${req.user.class_id || 'all'}_${department_id || 'ALL'}_${class_id || 'ALL'}_${tier || ''}_${search || ''}`;
+    const cachedReadiness = getApiCache(readinessCacheKey);
+    if (cachedReadiness) return res.json(cachedReadiness);
+
     const studentQueryParams: any[] = [];
     let studentQuery = `
       SELECT u.id, u.full_name, u.register_number, u.email, u.phone, u.class_id,
@@ -11938,55 +12028,74 @@ async function startServer() {
     studentQuery += ` ORDER BY u.register_number ASC`;
     classesQuery += ` ORDER BY year ASC, name ASC`;
 
+    const [studentsRes, classesRes] = await Promise.all([
+      pool.query(studentQuery, studentQueryParams),
+      pool.query(classesQuery, classesQueryParams)
+    ]);
+
+    if (studentsRes.rows.length === 0) {
+      return res.json({
+        success: true,
+        metrics: { total_students: 0, eligible_count: 0, tier1_count: 0, tier2_count: 0, tier3_count: 0, needs_attention_count: 0, average_readiness: 0, pass_rate: 0 },
+        students: [],
+        classes: classesRes.rows
+      });
+    }
+
+    const studentIds = studentsRes.rows.map((u: any) => u.id);
+    const classIds = Array.from(new Set(studentsRes.rows.map((u: any) => u.class_id).filter(Boolean)));
+
     const [
-      studentsRes,
       assessmentRes,
       leetcodeRes,
       projectRes,
       githubRes,
       taskSubRes,
-      taskClassRes,
-      classesRes
+      taskClassRes
     ] = await Promise.all([
-      pool.query(studentQuery, studentQueryParams),
       pool.query(`
-        SELECT DISTINCT ON (user_id) 
+        SELECT DISTINCT ON (user_id)
           user_id, score_percentage, correct_count, total_questions, proctor_photo_url, track_type, track_title
         FROM student_assessments
+        WHERE user_id = ANY($1::uuid[])
         ORDER BY user_id, score_percentage DESC, created_at DESC
-      `),
+      `, [studentIds]),
       pool.query(`
-        SELECT 
+        SELECT
           user_id,
           COUNT(CASE WHEN date >= CURRENT_DATE - INTERVAL '7 days' AND (solved_today > 0 OR status = 'COMPLETED') THEN 1 END) as active_days_7d,
           COUNT(CASE WHEN date >= CURRENT_DATE - INTERVAL '30 days' AND (solved_today > 0 OR status = 'COMPLETED') THEN 1 END) as active_days_30d,
           MAX(total_solved) as total_solved
         FROM leetcode_daily_progress
+        WHERE user_id = ANY($1::uuid[])
         GROUP BY user_id
-      `),
+      `, [studentIds]),
       pool.query(`
         SELECT user_id, COUNT(*) as project_count
         FROM student_projects
+        WHERE user_id = ANY($1::uuid[])
         GROUP BY user_id
-      `),
+      `, [studentIds]),
       pool.query(`
         SELECT student_id, SUM(daily_commit_count) as commits_30d
         FROM github_daily_commits
-        WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+        WHERE student_id = ANY($1::uuid[]) AND date >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY student_id
-      `),
+      `, [studentIds]),
       pool.query(`
         SELECT user_id, COUNT(DISTINCT task_id) as submitted_tasks
         FROM task_submissions
-        WHERE status IN ('VERIFIED', 'SUBMITTED')
+        WHERE user_id = ANY($1::uuid[]) AND status IN ('VERIFIED', 'SUBMITTED')
         GROUP BY user_id
-      `),
-      pool.query(`
-        SELECT tc.class_id, COUNT(DISTINCT tc.task_id) as total_tasks
-        FROM task_classes tc
-        GROUP BY tc.class_id
-      `),
-      pool.query(classesQuery, classesQueryParams)
+      `, [studentIds]),
+      classIds.length > 0
+        ? pool.query(`
+            SELECT tc.class_id, COUNT(DISTINCT tc.task_id) as total_tasks
+            FROM task_classes tc
+            WHERE tc.class_id = ANY($1::uuid[])
+            GROUP BY tc.class_id
+          `, [classIds])
+        : Promise.resolve({ rows: [] })
     ]);
 
     const assessmentMap = new Map();
@@ -12143,7 +12252,7 @@ async function startServer() {
       );
     }
 
-    res.json({
+    const readinessPayload = {
       success: true,
       metrics: {
         total_students: totalCount,
@@ -12157,7 +12266,9 @@ async function startServer() {
       },
       students: filtered,
       classes: classesRes.rows
-    });
+    };
+    setApiCache(readinessCacheKey, readinessPayload, 25);
+    res.json(readinessPayload);
   }));
 
   // Student's individual readiness profile
@@ -13223,11 +13334,13 @@ async function startServer() {
       await pool.query(`UPDATE company_profiles SET is_verified=TRUE, verified_by=$1, verified_at=NOW(), rejection_reason=NULL WHERE user_id=$2`, [adminId, userId]);
       await pool.query(`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, 'INDUSTRY_APPROVED')`, [userId, '🎉 Your industry account has been approved! You can now post jobs, internships and training programs.']);
       invalidateApiCache('industry_');
+      invalidateUserAuthCache(userId);
       res.json({ message: 'Industry account approved' });
     } else {
       await pool.query(`UPDATE company_profiles SET rejection_reason=$1, updated_at=NOW() WHERE user_id=$2`, [rejection_reason || 'Not approved', userId]);
       await pool.query(`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, 'INDUSTRY_REJECTED')`, [userId, `Your industry registration was not approved. Reason: ${rejection_reason || 'Not specified'}`]);
       invalidateApiCache('industry_');
+      invalidateUserAuthCache(userId);
       res.json({ message: 'Industry account rejected' });
     }
   }));
@@ -13352,17 +13465,93 @@ async function startServer() {
         return res.status(403).json({ error: 'Forbidden: Posting belongs to another company' });
       }
     }
+
+    const rankingCacheKey = `industry_posting_ranking_${postingId}`;
+    const cachedRanking = getApiCache(rankingCacheKey);
+    if (cachedRanking) return res.json(cachedRanking);
+
     const requiredSkills: { skill: string; level: number; weight: number }[] = postingRes.rows[0].required_skills || [];
     const studentsRes = await pool.query(
-      `SELECT u.id, u.full_name, u.email, u.register_number, sp.cgpa, sp.semester, u.class_id FROM users u LEFT JOIN student_profiles sp ON sp.user_id=u.id WHERE u.role='STUDENT' ORDER BY u.full_name ASC LIMIT 200`
+      `SELECT u.id, u.full_name, u.email, u.register_number, sp.cgpa, sp.semester, u.class_id,
+              COALESCE(scp.leetcode, u.leetcode_url, '') AS _leetcode_handle
+       FROM users u
+       LEFT JOIN student_profiles sp ON sp.user_id = u.id
+       LEFT JOIN student_coding_profiles scp ON scp.user_id = u.id
+       WHERE u.role = 'STUDENT'
+       ORDER BY u.full_name ASC
+       LIMIT 200`
     );
-    const results = await Promise.all(studentsRes.rows.map(async (student: any) => {
-      const studentSkills = await getStudentSkillsForMatch(student.id);
-      const { cgpa, leetcodeSolved } = await getStudentMetrics(student.id);
+
+    if (studentsRes.rows.length === 0) {
+      setApiCache(rankingCacheKey, [], 20);
+      return res.json([]);
+    }
+
+    const studentIds = studentsRes.rows.map((s: any) => s.id);
+    const [skillsRes, projRes, certRes, lcRes] = await Promise.all([
+      pool.query(`SELECT user_id, skill_name as name, level, proficiency FROM student_skills WHERE user_id = ANY($1::uuid[])`, [studentIds]),
+      pool.query(`SELECT user_id, tech_stack, project_name FROM student_projects WHERE user_id = ANY($1::uuid[]) AND tech_stack IS NOT NULL`, [studentIds]),
+      pool.query(`SELECT user_id, certificate_name FROM student_certifications WHERE user_id = ANY($1::uuid[]) AND certificate_name IS NOT NULL`, [studentIds]),
+      pool.query(`SELECT DISTINCT ON (user_id) user_id, total_solved FROM leetcode_daily_progress WHERE user_id = ANY($1::uuid[]) ORDER BY user_id, date DESC`, [studentIds])
+    ]);
+
+    const skillMapByUser = new Map<string, Map<string, { name: string; level: number; source: string; proficiency?: number }>>();
+    const getOrCreateSkillMap = (uid: string) => {
+      let m = skillMapByUser.get(uid);
+      if (!m) {
+        m = new Map();
+        skillMapByUser.set(uid, m);
+      }
+      return m;
+    };
+
+    for (const r of skillsRes.rows) {
+      const m = getOrCreateSkillMap(r.user_id);
+      const key = normalizeSkillKey(r.name);
+      const lvl = normalizeSkillLevel(r.level, r.proficiency);
+      m.set(key, { name: r.name, level: lvl, source: 'Verified Assessment', proficiency: r.proficiency });
+    }
+    for (const p of projRes.rows) {
+      const m = getOrCreateSkillMap(p.user_id);
+      const tokens = (p.tech_stack || '').split(/[,|;/]+/);
+      for (const token of tokens) {
+        const clean = token.trim();
+        if (!clean) continue;
+        const key = normalizeSkillKey(clean);
+        if (!m.has(key)) {
+          m.set(key, { name: clean, level: 2, source: `Project: ${p.project_name}` });
+        }
+      }
+    }
+    for (const c of certRes.rows) {
+      const m = getOrCreateSkillMap(c.user_id);
+      const tokens = (c.certificate_name || '').split(/[,|;/]+/);
+      for (const token of tokens) {
+        const clean = token.trim();
+        if (!clean) continue;
+        const key = normalizeSkillKey(clean);
+        if (!m.has(key)) {
+          m.set(key, { name: clean, level: 2, source: 'Certification' });
+        }
+      }
+    }
+
+    const lcSolvedByUser = new Map<string, number>();
+    for (const row of lcRes.rows) {
+      lcSolvedByUser.set(row.user_id, Number(row.total_solved) || 0);
+    }
+
+    const results = studentsRes.rows.map((student: any) => {
+      const { _leetcode_handle, ...studentPublic } = student;
+      const studentSkills = Array.from(skillMapByUser.get(student.id)?.values() || []);
+      const cgpa = parseFloat(student.cgpa || '0');
+      const leetcodeSolved = _leetcode_handle ? (lcSolvedByUser.get(student.id) || 0) : 0;
       const match = computeMatchScore(studentSkills, requiredSkills, cgpa, leetcodeSolved);
-      return { ...student, match_score: match.score, matched_skills: match.matched, gap_skills: match.gaps };
-    }));
+      return { ...studentPublic, match_score: match.score, matched_skills: match.matched, gap_skills: match.gaps };
+    });
+
     results.sort((a, b) => b.match_score - a.match_score);
+    setApiCache(rankingCacheKey, results, 20);
     res.json(results);
   }));
 
