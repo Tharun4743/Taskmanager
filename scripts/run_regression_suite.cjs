@@ -199,6 +199,145 @@ console.log('\n--- Test Group 4: Mobile Viewport & Responsive UI Invariants ---'
   assert(inspector.includes('overflow-y-auto lg:overflow-hidden') && inspector.includes('h-[92dvh]'), 'SubmissionInspectorModal scrolls vertically on small mobile viewports');
 }
 
+// ── TEST GROUP 5: Dashboard Gender, Event & Status Filter Consistency ─────────
+console.log('\n--- Test Group 5: Dashboard UnifiedAnalyzer Filtering (via esbuild) ---');
+try {
+  const esbuild = require('esbuild');
+  const analyzerBundle = esbuild.buildSync({
+    entryPoints: [path.resolve('src/modules/dashboard/analyzerUtils.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    write: false,
+  });
+
+  const mod = { exports: {} };
+  const fn = new Function('exports', 'require', 'module', analyzerBundle.outputFiles[0].text);
+  fn(mod.exports, require, mod);
+  const { computeAnalyzerData, getStudentGender } = mod.exports;
+
+  // Build synthetic cohort matching real scenario: 30 boys + 20 girls in Class A, plus 5 boys in Class B
+  const users = [];
+  for (let i = 1; i <= 30; i++) {
+    users.push({ id: `b-${i}`, role: 'STUDENT', full_name: `Boy ${i}`, gender: i % 2 === 0 ? 'MALE' : 'M', class_id: 'cls-a', department_id: 'dept-1' });
+  }
+  for (let i = 1; i <= 20; i++) {
+    users.push({ id: `g-${i}`, role: 'STUDENT', full_name: `Girl ${i}`, gender: i === 1 ? 'F' : i === 2 ? 'Girl' : 'FEMALE', class_id: 'cls-a', department_id: 'dept-1' });
+  }
+  users.push({ id: 'b-clsb-1', role: 'STUDENT', full_name: 'Other Class Boy', gender: 'MALE', class_id: 'cls-b', department_id: 'dept-1' });
+
+  const classes = [
+    { id: 'cls-a', name: 'III IT A', department_id: 'dept-1', year: 3 },
+    { id: 'cls-b', name: 'II IT B', department_id: 'dept-1', year: 2 },
+  ];
+  const tasks = [
+    { id: 'tcs-vita', title: 'TCS Code Vita', department_id: 'dept-1', class_ids: ['cls-a'] },
+    { id: 'sih-hack', title: 'SIH Hackathon', department_id: 'dept-1', class_ids: ['cls-a', 'cls-b'] },
+  ];
+  const submissions = [];
+  // 13 boys completed/verified TCS Code Vita; 1 boy skipped
+  for (let i = 1; i <= 10; i++) submissions.push({ id: `sbv-${i}`, user_id: `b-${i}`, task_id: 'tcs-vita', status: 'VERIFIED' });
+  for (let i = 11; i <= 13; i++) submissions.push({ id: `sbs-${i}`, user_id: `b-${i}`, task_id: 'tcs-vita', status: 'SUBMITTED' });
+  submissions.push({ id: 'sb-skip-1', user_id: 'b-14', task_id: 'tcs-vita', status: 'NOT_PARTICIPATING' });
+  // 5 girls completed TCS Code Vita; 1 girl skipped
+  for (let i = 1; i <= 5; i++) submissions.push({ id: `sgv-${i}`, user_id: `g-${i}`, task_id: 'tcs-vita', status: 'VERIFIED' });
+  submissions.push({ id: 'sg-skip-1', user_id: 'g-6', task_id: 'tcs-vita', status: 'NOT_PARTICIPATING' });
+  // Different event (SIH Hackathon): 2 boys verified + 3 girls submitted
+  for (let i = 1; i <= 2; i++) submissions.push({ id: `sb-sih-${i}`, user_id: `b-${i}`, task_id: 'sih-hack', status: 'VERIFIED' });
+  for (let i = 1; i <= 3; i++) submissions.push({ id: `sg-sih-${i}`, user_id: `g-${i}`, task_id: 'sih-hack', status: 'SUBMITTED' });
+
+  assert(getStudentGender({ gender: 'F' }) === 'FEMALE' && getStudentGender({ gender: 'Girl' }) === 'FEMALE', 'Normalizes F and Girl variants as FEMALE');
+
+  // Case 1: Event = TCS Code Vita, Gender = BOYS, Status = ALL
+  const case1 = computeAnalyzerData({
+    role: 'CLASS_ADVISOR', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', userClassId: 'cls-a',
+    analyzerTaskFilter: 'tcs-vita', analyzerGenderFilter: 'BOYS', analyzerStatusFilter: 'ALL',
+  });
+  assert(
+    case1.cardStats.total === 30 && case1.cardStats.boysTotal === 30 && case1.cardStats.girlsTotal === 0,
+    'Case 1 Total Students shows only boys (30) with girls = 0'
+  );
+  assert(
+    case1.cardStats.responded === 13 && case1.cardStats.boysResponded === 13 && case1.cardStats.girlsResponded === 0,
+    'Case 1 Responded shows only boys (13) with girls = 0'
+  );
+  assert(
+    case1.cardStats.completed === 13 && case1.cardStats.boysCompleted === 13 && case1.cardStats.girlsCompleted === 0,
+    'Case 1 Completed shows only boys (13) with girls = 0'
+  );
+  assert(
+    case1.cardStats.skipped === 1 && case1.cardStats.boysSkipped === 1 && case1.cardStats.girlsSkipped === 0,
+    'Case 1 Skipped shows only boys (1) with girls = 0'
+  );
+
+  // Case 2: Event = TCS Code Vita, Gender = GIRLS, Status = ALL
+  const case2 = computeAnalyzerData({
+    role: 'CLASS_ADVISOR', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', userClassId: 'cls-a',
+    analyzerTaskFilter: 'tcs-vita', analyzerGenderFilter: 'GIRLS', analyzerStatusFilter: 'ALL',
+  });
+  assert(
+    case2.cardStats.total === 20 && case2.cardStats.boysTotal === 0 && case2.cardStats.girlsTotal === 20 &&
+    case2.cardStats.responded === 5 && case2.cardStats.boysResponded === 0 && case2.cardStats.girlsResponded === 5 &&
+    case2.cardStats.completed === 5 && case2.cardStats.boysCompleted === 0 && case2.cardStats.girlsCompleted === 5 &&
+    case2.cardStats.skipped === 1 && case2.cardStats.boysSkipped === 0 && case2.cardStats.girlsSkipped === 1,
+    'Case 2 Gender = GIRLS isolates all 4 cards and zeroed Boys counts accurately'
+  );
+
+  // Case 3: Event = TCS Code Vita, Gender = ALL, Status = ALL
+  const case3 = computeAnalyzerData({
+    role: 'CLASS_ADVISOR', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', userClassId: 'cls-a',
+    analyzerTaskFilter: 'tcs-vita', analyzerGenderFilter: 'ALL', analyzerStatusFilter: 'ALL',
+  });
+  assert(
+    case3.cardStats.total === 50 && case3.cardStats.boysTotal === 30 && case3.cardStats.girlsTotal === 20 &&
+    case3.cardStats.responded === 18 && case3.cardStats.boysResponded === 13 && case3.cardStats.girlsResponded === 5 &&
+    case3.cardStats.completed === 18 && case3.cardStats.boysCompleted === 13 && case3.cardStats.girlsCompleted === 5 &&
+    case3.cardStats.skipped === 2 && case3.cardStats.boysSkipped === 1 && case3.cardStats.girlsSkipped === 1,
+    'Case 3 Gender = ALL sums boys + girls consistently across all 4 cards'
+  );
+
+  // Case 4/5: Event changes + HOD scope excludes unassigned class when event is class-specific
+  const hodTcs = computeAnalyzerData({
+    role: 'HOD', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', analyzerTaskFilter: 'tcs-vita',
+    analyzerGenderFilter: 'BOYS', analyzerStatusFilter: 'ALL',
+  });
+  const hodSih = computeAnalyzerData({
+    role: 'HOD', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', analyzerTaskFilter: 'sih-hack',
+    analyzerGenderFilter: 'BOYS', analyzerStatusFilter: 'ALL',
+  });
+  assert(
+    hodTcs.cardStats.total === 30 && hodTcs.cardStats.completed === 13 &&
+    hodSih.cardStats.total === 31 && hodSih.cardStats.completed === 2 && hodSih.cardStats.skipped === 0,
+    'Case 5 Switching Event updates eligible student scope & all card metrics immediately'
+  );
+
+  // Case 6: Status filter preserves overview card metrics while filtering table rows accurately inside gender cohort
+  const pendingBoys = computeAnalyzerData({
+    role: 'CLASS_ADVISOR', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', userClassId: 'cls-a',
+    analyzerTaskFilter: 'tcs-vita', analyzerGenderFilter: 'BOYS', analyzerStatusFilter: 'PENDING',
+  });
+  const skippedGirls = computeAnalyzerData({
+    role: 'CLASS_ADVISOR', users, tasks, submissions, classes,
+    userDepartmentId: 'dept-1', userClassId: 'cls-a',
+    analyzerTaskFilter: 'tcs-vita', analyzerGenderFilter: 'GIRLS', analyzerStatusFilter: 'NOT_PARTICIPATING',
+  });
+  assert(
+    pendingBoys.cardStats.completed === 13 && pendingBoys.filteredRows.length === 16 &&
+    pendingBoys.filteredRows.every(r => r.normalizedGender === 'MALE') &&
+    skippedGirls.filteredRows.length === 1 && skippedGirls.filteredRows[0].id === 'g-6',
+    'Case 6 Status filter filters rows within active gender cohort without breaking overview cards'
+  );
+} catch (err) {
+  console.error('  [ERROR] Group 5 failed:', err);
+  testsFailed++;
+}
+
 console.log('\n==============================================================');
 console.log(`TOTAL TESTS: ${testsPassed + testsFailed} | PASSED: ${testsPassed} | FAILED: ${testsFailed}`);
 console.log('==============================================================');

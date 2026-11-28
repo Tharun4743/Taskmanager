@@ -17,6 +17,7 @@ import { SimpleBarChart } from '../../components/ui/SimpleBarChart';
 import { Table, THead, TBody, TR, TH, TD } from '../../components/ui/Table';
 import { SystemAutomationControlsCard } from '../admin/SystemAutomationControlsCard';
 import { getStudentTaskStatusBadge, getStudentRegisterNumber } from '../../components/common/helpers';
+import { computeAnalyzerData, isStudentAssignedToTask } from './analyzerUtils';
 import { cn } from '../../lib/utils';
 import type {
   User, Department, Class, Task, Submission,
@@ -90,131 +91,31 @@ export function DashboardView({
     const currentDeptId = isGlobal ? adminDeptFilter : user?.department_id?.toString();
     const currentClassId = isCls ? (user?.class_id || myClass?.id)?.toString() : analyzerClassFilter;
 
-    const deptStudents = users.filter(u => {
-      if (u.role !== 'STUDENT') return false;
-      if (isCls) return u.class_id?.toString() === currentClassId;
-      if (currentDeptId) return u.department_id?.toString() === currentDeptId;
-      return true;
-    }).filter(u => {
-      if (!isCls && analyzerClassFilter) return u.class_id?.toString() === analyzerClassFilter;
-      // HOD year filter: when a year is selected but no specific class, filter students by year
-      if (isDept && analyzerYearFilter && !analyzerClassFilter) {
-        const studentClass = classes.find(c => c.id.toString() === u.class_id?.toString());
-        return String(studentClass?.year) === analyzerYearFilter;
-      }
-      return true;
-    });
-
-    const enriched = deptStudents.map(student => {
-      let submissionStatus = 'PENDING';
-      let submissionLabel = 'Not Registered';
-      const clsName = classes.find(c => c.id.toString() === student.class_id?.toString())?.name || '—';
-      let missingTasks: any[] = [];
-
-      if (analyzerTaskFilter) {
-        const sub = submissions.find(s =>
-          s.user_id?.toString() === student.id?.toString() &&
-          s.task_id?.toString() === analyzerTaskFilter
-        );
-        if (sub) {
-          submissionStatus = sub.status;
-          submissionLabel = sub.status === 'VERIFIED' ? 'Verified' : sub.status === 'REJECTED' ? 'Rejected' : sub.status === 'NOT_PARTICIPATING' ? 'Not Interested' : 'Submitted';
-        }
-      } else {
-        const studentSubs = submissions.filter(s => s.user_id?.toString() === student.id?.toString());
-        const visibleTasks = tasks.filter(t => {
-          if (analyzerClassFilter) {
-            if ((t.class_ids || []).some(cid => cid.toString() === analyzerClassFilter)) return true;
-            if (t.department_id && t.department_id.toString() === student.department_id?.toString() && (!(t.class_ids || []).length)) return true;
-            if (!t.department_id && (!(t.class_ids || []).length)) return true;
-            return false;
-          }
-          if (Array.isArray(t.class_ids) && t.class_ids.length > 0 && !t.class_ids.some(cid => cid.toString() === student.class_id?.toString())) return false;
-          if (t.department_id && t.department_id.toString() !== student.department_id?.toString() && (!(t.class_ids || []).length)) return false;
-          return true;
-        });
-
-        const visibleTaskIds = new Set(visibleTasks.map(t => (t as any)._id?.toString() || (t as any).id?.toString()));
-        const studentSubsInContext = studentSubs.filter(s => visibleTaskIds.has(s.task_id?.toString()));
-        const totalTasks = visibleTasks.length;
-        const doneTaskIds = new Set(studentSubsInContext.filter(s => s.status === 'VERIFIED' || s.status === 'SUBMITTED').map(s => s.task_id?.toString()));
-        const doneCount = doneTaskIds.size;
-
-        missingTasks = visibleTasks.filter(t => !doneTaskIds.has((t as any)._id?.toString() || (t as any).id?.toString()));
-
-        submissionLabel = `${doneCount} / ${totalTasks} Events`;
-        if (totalTasks === 0) {
-          submissionStatus = 'PENDING';
-        } else if (doneCount === totalTasks) {
-          submissionStatus = 'VERIFIED';
-        } else if (doneCount > 0) {
-          submissionStatus = 'SUBMITTED';
-        } else {
-          submissionStatus = 'PENDING';
-        }
-      }
-
-      return { ...student, submissionStatus, submissionLabel, clsName, missingTasks };
-    });
-
-    const getStudentGender = (student: any): 'MALE' | 'FEMALE' => {
-      const g = (student.gender || '').toUpperCase();
-      if (g === 'FEMALE' || g === 'GIRLS') return 'FEMALE';
-      return 'MALE';
-    };
-
-    const isStudentDone = (s: any) => {
-      if (analyzerTaskFilter) {
-        return s.submissionStatus === 'VERIFIED' || s.submissionStatus === 'SUBMITTED';
-      }
-      return s.submissionStatus === 'VERIFIED';
-    };
-
-    const isStudentResponded = (s: any) => {
-      const studentSubs = submissions.filter(sub => sub.user_id?.toString() === s.id?.toString() && sub.status !== 'NOT_PARTICIPATING');
-      if (analyzerTaskFilter) {
-        return studentSubs.some(sub => sub.task_id?.toString() === analyzerTaskFilter);
-      }
-      return studentSubs.length > 0;
-    };
-
-    const isStudentSkipped = (s: any) => {
-      const studentSubs = submissions.filter(sub => sub.user_id?.toString() === s.id?.toString());
-      if (analyzerTaskFilter) {
-        return studentSubs.some(sub => sub.task_id?.toString() === analyzerTaskFilter && sub.status === 'NOT_PARTICIPATING');
-      }
-      return studentSubs.some(sub => sub.status === 'NOT_PARTICIPATING');
-    };
-
-    const boysEnriched = enriched.filter(s => getStudentGender(s) === 'MALE');
-    const girlsEnriched = enriched.filter(s => getStudentGender(s) === 'FEMALE');
-
-    const boysCompleted = boysEnriched.filter(isStudentDone).length;
-    const boysPending = boysEnriched.length - boysCompleted;
-
-    const girlsCompleted = girlsEnriched.filter(isStudentDone).length;
-    const girlsPending = girlsEnriched.length - girlsCompleted;
-
-    const completedCount = enriched.filter(isStudentDone).length;
-    const pendingCount = enriched.length - completedCount;
-
-    const respondedCount = enriched.filter(isStudentResponded).length;
-    const boysResponded = boysEnriched.filter(isStudentResponded).length;
-    const girlsResponded = girlsEnriched.filter(isStudentResponded).length;
-
-    const skippedCount = enriched.filter(isStudentSkipped).length;
-    const boysSkipped = boysEnriched.filter(isStudentSkipped).length;
-    const girlsSkipped = girlsEnriched.filter(isStudentSkipped).length;
-
-    const filtered = enriched.filter(s => {
-      const g = getStudentGender(s);
-      if (analyzerGenderFilter === 'BOYS' && g !== 'MALE') return false;
-      if (analyzerGenderFilter === 'GIRLS' && g !== 'FEMALE') return false;
-      if (analyzerStatusFilter === 'COMPLETED') return isStudentDone(s);
-      if (analyzerStatusFilter === 'PENDING') return !isStudentDone(s) && s.submissionStatus !== 'NOT_PARTICIPATING';
-      if (analyzerStatusFilter === 'NOT_PARTICIPATING') return s.submissionStatus === 'NOT_PARTICIPATING';
-      return true;
-    });
+    const {
+      genderCohort,
+      filteredRows: filtered,
+      scopeStats,
+      cardStats,
+    } = useMemo(() => computeAnalyzerData({
+      role,
+      users,
+      tasks,
+      submissions,
+      classes,
+      userDepartmentId: user?.department_id?.toString(),
+      userClassId: (user?.class_id || myClass?.id)?.toString(),
+      adminDeptFilter,
+      analyzerClassFilter,
+      analyzerYearFilter,
+      analyzerTaskFilter,
+      analyzerGenderFilter,
+      analyzerStatusFilter,
+    }), [
+      role, users, tasks, submissions, classes,
+      user?.department_id, user?.class_id, myClass?.id,
+      adminDeptFilter, analyzerClassFilter, analyzerYearFilter,
+      analyzerTaskFilter, analyzerGenderFilter, analyzerStatusFilter,
+    ]);
 
     return (
       <ContentCard className="p-0 overflow-hidden mt-10">
@@ -331,45 +232,45 @@ export function DashboardView({
           <div className="bg-white p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs">
             <div>
               <p className="text-[9px] sm:text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Total Students</p>
-              <p className="text-xl sm:text-2xl font-black text-zinc-900 mt-0.5">{enriched.length}</p>
+              <p className="text-xl sm:text-2xl font-black text-zinc-900 mt-0.5">{cardStats.total}</p>
             </div>
             <div className="text-left sm:text-right text-[11px] sm:text-xs font-semibold text-zinc-600 space-y-0.5">
-              <p className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {boysEnriched.length}</p>
-              <p className="bg-pink-50 text-pink-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {girlsEnriched.length}</p>
+              <p className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {cardStats.boysTotal}</p>
+              <p className="bg-pink-50 text-pink-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {cardStats.girlsTotal}</p>
             </div>
           </div>
 
           <div className="bg-white dark:bg-[#18181c] p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-indigo-200 dark:border-indigo-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs">
             <div>
               <p className="text-[9px] sm:text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">Responded</p>
-              <p className="text-xl sm:text-2xl font-black text-indigo-700 dark:text-indigo-300 mt-0.5">{respondedCount}</p>
+              <p className="text-xl sm:text-2xl font-black text-indigo-700 dark:text-indigo-300 mt-0.5">{cardStats.responded}</p>
               <span className="text-[9px] font-semibold text-indigo-500 dark:text-indigo-400">Interested</span>
             </div>
             <div className="text-left sm:text-right text-[11px] sm:text-xs font-semibold space-y-0.5">
-              <p className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {boysResponded}</p>
-              <p className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {girlsResponded}</p>
+              <p className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {cardStats.boysResponded}</p>
+              <p className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {cardStats.girlsResponded}</p>
             </div>
           </div>
 
           <div className="bg-white p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs">
             <div>
               <p className="text-[9px] sm:text-[10px] font-bold text-emerald-500 uppercase tracking-wider">Completed</p>
-              <p className="text-xl sm:text-2xl font-black text-emerald-600 mt-0.5">{completedCount}</p>
+              <p className="text-xl sm:text-2xl font-black text-emerald-600 mt-0.5">{cardStats.completed}</p>
             </div>
             <div className="text-left sm:text-right text-[11px] sm:text-xs font-semibold space-y-0.5">
-              <p className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {boysCompleted}</p>
-              <p className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {girlsCompleted}</p>
+              <p className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {cardStats.boysCompleted}</p>
+              <p className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {cardStats.girlsCompleted}</p>
             </div>
           </div>
 
           <div className="bg-white p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs">
             <div>
               <p className="text-[9px] sm:text-[10px] font-bold text-orange-500 uppercase tracking-wider">Skipped</p>
-              <p className="text-xl sm:text-2xl font-black text-orange-600 mt-0.5">{skippedCount}</p>
+              <p className="text-xl sm:text-2xl font-black text-orange-600 mt-0.5">{cardStats.skipped}</p>
             </div>
             <div className="text-left sm:text-right text-[11px] sm:text-xs font-semibold space-y-0.5">
-              <p className="bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {boysSkipped}</p>
-              <p className="bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {girlsSkipped}</p>
+              <p className="bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Boys: {cardStats.boysSkipped}</p>
+              <p className="bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded-md flex items-center sm:justify-end gap-1"><UserIcon size={11} /> Girls: {cardStats.girlsSkipped}</p>
             </div>
           </div>
         </div>
@@ -378,8 +279,8 @@ export function DashboardView({
         <div className="px-3.5 sm:px-8 py-4 sm:py-6 grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-8 bg-zinc-50/20 border-b border-zinc-100">
           <div className="lg:col-span-1 flex justify-center items-center bg-white p-4 sm:p-8 rounded-2xl sm:rounded-3xl border border-zinc-100 shadow-xs">
             <CircularProgress
-              value={completedCount}
-              total={enriched.length}
+              value={cardStats.completed}
+              total={cardStats.total}
               label="Overall Completion"
               color="text-emerald-500"
               size="lg"
@@ -392,12 +293,12 @@ export function DashboardView({
                 color="bg-gradient-to-r from-emerald-400 via-teal-400 to-emerald-500 shadow-[0_0_10px_rgba(52,211,153,0.5)]"
                 data={(() => {
                   const classMap = new Map();
-                  enriched.forEach(s => {
+                  genderCohort.forEach(s => {
                     const cls = s.clsName || 'Unknown';
                     if (!classMap.has(cls)) classMap.set(cls, { value: 0, total: 0 });
                     const stats = classMap.get(cls);
                     stats.total++;
-                    if (s.submissionStatus === 'VERIFIED' || s.submissionStatus === 'SUBMITTED') stats.value++;
+                    if (s.isDone) stats.value++;
                   });
                   return Array.from(classMap.entries()).map(([label, stats]) => ({ label, ...stats }));
                 })()}
@@ -413,11 +314,7 @@ export function DashboardView({
                   return true;
                 }).slice(0, 10).map(t => {
                   const taskSubmissions = submissions.filter(s => s.task_id?.toString() === t.id.toString());
-                  const relevantStudents = enriched.filter(s => {
-                    if (t.class_ids?.length > 0) return t.class_ids.some(cid => cid.toString() === s.class_id?.toString());
-                    if (t.department_id) return t.department_id.toString() === s.department_id?.toString();
-                    return true;
-                  });
+                  const relevantStudents = genderCohort.filter(s => isStudentAssignedToTask(s, t));
                   const done = relevantStudents.filter(s => {
                     const sub = taskSubmissions.find(sub => sub.user_id?.toString() === s.id.toString());
                     return sub && (sub.status === 'VERIFIED' || sub.status === 'SUBMITTED');
@@ -436,10 +333,10 @@ export function DashboardView({
                 <span className="text-xs font-bold text-zinc-700">{filtered.length} Students</span>
               </div>
               <div className="flex items-center gap-1.5 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-100">
-                <span className="text-xs font-bold text-emerald-700">{filtered.filter(isStudentDone).length} Done</span>
+                <span className="text-xs font-bold text-emerald-700">{filtered.filter(s => s.isDone).length} Done</span>
               </div>
               <div className="flex items-center gap-1.5 bg-red-50 px-3 py-1.5 rounded-full border border-red-100">
-                <span className="text-xs font-bold text-red-700">{filtered.length - filtered.filter(isStudentDone).length} Not Registered</span>
+                <span className="text-xs font-bold text-red-700">{filtered.length - filtered.filter(s => s.isDone).length} Not Registered</span>
               </div>
             </div>
 
@@ -454,7 +351,7 @@ export function DashboardView({
                     : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-200/60 dark:hover:bg-zinc-700/60"
                 )}
               >
-                All ({enriched.length})
+                All ({scopeStats.total})
               </button>
               <button
                 type="button"
@@ -466,7 +363,7 @@ export function DashboardView({
                     : "text-blue-600 dark:text-sky-400 hover:bg-blue-50 dark:hover:bg-sky-950/40"
                 )}
               >
-                Boys ({boysEnriched.length})
+                Boys ({scopeStats.boysTotal})
               </button>
               <button
                 type="button"
@@ -478,7 +375,7 @@ export function DashboardView({
                     : "text-pink-600 dark:text-rose-400 hover:bg-pink-50 dark:hover:bg-rose-950/40"
                 )}
               >
-                Girls ({girlsEnriched.length})
+                Girls ({scopeStats.girlsTotal})
               </button>
             </div>
           </div>
@@ -500,7 +397,7 @@ export function DashboardView({
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-bold text-zinc-900">{student.full_name}</span>
                         {student.gender && (() => {
-                          const isBoy = ['MALE', 'BOYS', 'BOY', 'M'].includes((student.gender || '').toUpperCase());
+                          const isBoy = student.normalizedGender === 'MALE';
                           return (
                             <span className={cn("px-2 py-0.5 text-[10px] font-bold rounded uppercase border flex items-center gap-1", isBoy ? "bg-blue-50 text-blue-600 border-blue-100" : "bg-pink-50 text-pink-600 border-pink-100")}>
                               <UserIcon size={10} /> {isBoy ? 'Boy' : 'Girl'}
