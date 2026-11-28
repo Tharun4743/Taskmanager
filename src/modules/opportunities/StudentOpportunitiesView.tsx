@@ -150,9 +150,17 @@ export default function StudentOpportunitiesView({ token, user }: { token: strin
     setSelectedPosting(p); setMatchResult(null); setMatchLoading(true);
     try {
       const r = await fetch(`${API_URL}/api/postings/${p.id}/match`, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` } });
-      if (r.ok) setMatchResult(await r.json());
-    } catch {}
-    setMatchLoading(false);
+      if (r.ok) {
+        setMatchResult(await r.json());
+      } else {
+        const d = await r.json().catch(() => ({}));
+        showToast(d.error || 'Failed to compute eligibility match', 'error');
+      }
+    } catch {
+      showToast('Network error loading eligibility match', 'error');
+    } finally {
+      setMatchLoading(false);
+    }
   };
 
   const applyToPosting = async () => {

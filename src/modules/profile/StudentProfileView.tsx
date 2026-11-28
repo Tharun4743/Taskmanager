@@ -177,6 +177,9 @@ export function StudentProfileView({
       if (res.ok) {
         addToast('Profile photo URL saved!', 'success');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to save photo URL', 'error');
       }
     } catch {
       addToast('Error saving photo URL', 'error');
@@ -197,8 +200,12 @@ export function StudentProfileView({
         setAvatarUrl('');
         addToast('Profile photo removed', 'info');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove profile photo', 'error');
       }
     } catch {
+      addToast('Network error removing profile photo', 'error');
     } finally {
       setUploadingAvatar(false);
     }
@@ -257,6 +264,9 @@ export function StudentProfileView({
         addToast('Skill added!', 'success');
         setNewSkillName('');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to add skill', 'error');
       }
     } catch {
       addToast('Failed to add skill', 'error');
@@ -274,8 +284,13 @@ export function StudentProfileView({
       if (res.ok) {
         addToast('Skill removed', 'info');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove skill', 'error');
       }
-    } catch { }
+    } catch {
+      addToast('Network error removing skill', 'error');
+    }
   };
 
   const handleAddProject = async (e: React.FormEvent) => {
@@ -298,6 +313,9 @@ export function StudentProfileView({
         addToast('Project added!', 'success');
         setNewProjName(''); setNewProjDesc(''); setNewProjTech(''); setNewProjGithub(''); setNewProjDemo('');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to add project', 'error');
       }
     } catch {
       addToast('Failed to add project', 'error');
@@ -308,13 +326,20 @@ export function StudentProfileView({
 
   const handleDeleteProject = async (id: string) => {
     try {
-      await fetch(`${API_URL}/api/student/profile/projects/${id}`, {
+      const res = await fetch(`${API_URL}/api/student/profile/projects/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      addToast('Project removed', 'info');
-      fetchProfileData();
-    } catch { }
+      if (res.ok) {
+        addToast('Project removed', 'info');
+        fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove project', 'error');
+      }
+    } catch {
+      addToast('Network error removing project', 'error');
+    }
   };
 
   const handleAddInternship = async (e: React.FormEvent) => {
@@ -341,6 +366,9 @@ export function StudentProfileView({
         addToast('Internship added!', 'success');
         setNewInternCompany(''); setNewInternRole(''); setNewInternDuration(''); setNewInternCertUrl('');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to add internship', 'error');
       }
     } catch {
       addToast('Failed to add internship', 'error');
@@ -351,13 +379,20 @@ export function StudentProfileView({
 
   const handleDeleteInternship = async (id: string) => {
     try {
-      await fetch(`${API_URL}/api/student/profile/internships/${id}`, {
+      const res = await fetch(`${API_URL}/api/student/profile/internships/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      addToast('Internship removed', 'info');
-      fetchProfileData();
-    } catch { }
+      if (res.ok) {
+        addToast('Internship removed', 'info');
+        fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove internship', 'error');
+      }
+    } catch {
+      addToast('Network error removing internship', 'error');
+    }
   };
 
   const handleAddCertification = async (e: React.FormEvent) => {
@@ -380,6 +415,9 @@ export function StudentProfileView({
         addToast('Certification added!', 'success');
         setNewCertName(''); setNewCertProvider(''); setNewCertIssueDate(''); setNewCertCredentialId(''); setNewCertUrl('');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to add certification', 'error');
       }
     } catch {
       addToast('Failed to add certification', 'error');
@@ -390,13 +428,20 @@ export function StudentProfileView({
 
   const handleDeleteCert = async (id: string) => {
     try {
-      await fetch(`${API_URL}/api/student/profile/certifications/${id}`, {
+      const res = await fetch(`${API_URL}/api/student/profile/certifications/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      addToast('Certification removed', 'info');
-      fetchProfileData();
-    } catch { }
+      if (res.ok) {
+        addToast('Certification removed', 'info');
+        fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove certification', 'error');
+      }
+    } catch {
+      addToast('Network error removing certification', 'error');
+    }
   };
 
   const handleSaveCodingProfiles = async (e: React.FormEvent) => {
@@ -417,6 +462,9 @@ export function StudentProfileView({
       if (res.ok) {
         addToast('Coding profiles saved!', 'success');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to save coding profiles', 'error');
       }
     } catch {
       addToast('Failed to save coding profiles', 'error');
@@ -448,6 +496,9 @@ export function StudentProfileView({
         addToast('Achievement added!', 'success');
         setNewAchTitle(''); setNewAchDesc(''); setNewAchDate('');
         fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to add achievement', 'error');
       }
     } catch {
       addToast('Failed to add achievement', 'error');
@@ -458,13 +509,20 @@ export function StudentProfileView({
 
   const handleDeleteAchievement = async (id: string) => {
     try {
-      await fetch(`${API_URL}/api/student/profile/achievements/${id}`, {
+      const res = await fetch(`${API_URL}/api/student/profile/achievements/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      addToast('Achievement removed', 'info');
-      fetchProfileData();
-    } catch { }
+      if (res.ok) {
+        addToast('Achievement removed', 'info');
+        fetchProfileData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to remove achievement', 'error');
+      }
+    } catch {
+      addToast('Network error removing achievement', 'error');
+    }
   };
 
   if (loading) {

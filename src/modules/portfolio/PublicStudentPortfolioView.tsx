@@ -23,11 +23,15 @@ import { API_URL } from '../../config';
 import { ThemeToggle } from '../../components/layout/ThemeToggle';
 
 interface PublicPortfolioProps {
-  regNo: string;
+  regNo?: string;
+  registerNumber?: string;
   onBackToApp?: () => void;
+  onBack?: () => void;
 }
 
-export default function PublicStudentPortfolioView({ regNo, onBackToApp }: PublicPortfolioProps) {
+export default function PublicStudentPortfolioView({ regNo, registerNumber, onBackToApp, onBack }: PublicPortfolioProps) {
+  const activeRegNo = regNo || registerNumber || '';
+  const handleBack = onBackToApp || onBack;
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,10 +55,10 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
       try {
         setLoading(true);
         setError(null);
-        const res = await fetch(`${API_URL}/api/public/portfolio/${encodeURIComponent(regNo)}`);
+        const res = await fetch(`${API_URL}/api/public/portfolio/${encodeURIComponent(activeRegNo)}`);
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || `Unable to load portfolio for ${regNo}`);
+          throw new Error(errData.error || `Unable to load portfolio for ${activeRegNo}`);
         }
         const json = await res.json();
         setData(json);
@@ -65,12 +69,15 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
       }
     };
 
-    if (regNo) {
+    if (activeRegNo) {
       fetchPortfolio();
+    } else {
+      setError('No register number specified for public portfolio.');
+      setLoading(false);
     }
-  }, [regNo]);
+  }, [activeRegNo]);
 
-  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/p/${encodeURIComponent(regNo)}` : '';
+  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/p/${encodeURIComponent(activeRegNo)}` : '';
 
   const handleCopyLink = () => {
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
@@ -85,7 +92,7 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
       <div className="min-h-screen h-[100dvh] w-full overflow-y-auto bg-slate-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col items-center justify-center p-6">
         <div className="w-12 h-12 border-3 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-4" />
         <p className="text-zinc-500 dark:text-zinc-400 text-sm font-mono tracking-wide animate-pulse">
-          Retrieving verified academic record for {regNo}...
+          Retrieving verified academic record for {activeRegNo}...
         </p>
       </div>
     );
@@ -101,9 +108,9 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
         <p className="text-zinc-600 dark:text-zinc-400 text-sm max-w-md mb-6 leading-relaxed">
           {error || 'This student profile is either private or does not exist in the VSBEC IT Vault registry.'}
         </p>
-        {onBackToApp && (
+        {handleBack && (
           <button
-            onClick={onBackToApp}
+            onClick={handleBack}
             className="px-5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 text-sm font-semibold flex items-center gap-2 transition cursor-pointer shadow-sm"
           >
             <ArrowLeft size={16} /> Return to Portal
@@ -129,9 +136,9 @@ export default function PublicStudentPortfolioView({ regNo, onBackToApp }: Publi
       {/* Top Navbar */}
       <header className="sticky top-0 z-40 bg-white/85 dark:bg-zinc-950/85 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800/80 px-4 sm:px-8 py-3.5 flex items-center justify-between gap-3 shadow-xs">
         <div className="flex items-center gap-3 min-w-0">
-          {onBackToApp && (
+          {handleBack && (
             <button
-              onClick={onBackToApp}
+              onClick={handleBack}
               className="p-2 rounded-xl text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer shrink-0"
               title="Return to Portal"
             >

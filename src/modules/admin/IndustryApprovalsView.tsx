@@ -17,12 +17,14 @@ export interface IndustryApprovalsViewProps {
   user: User | null;
   token: string | null;
   addToast?: (msg: string, type?: ToastType) => void;
+  onRefresh?: () => void;
 }
 
 export function IndustryApprovalsView({
   user,
   token,
   addToast = () => {},
+  onRefresh,
 }: IndustryApprovalsViewProps) {
   const isFetchingIndustryRef = useRef(false);
 
@@ -78,6 +80,7 @@ export function IndustryApprovalsView({
         setIndustryRejectModal(null);
         setIndustryRejectReason('');
         await fetchIndustryData();
+        onRefresh?.();
       } else {
         addToast(data.error || 'Approval action failed', 'error');
       }

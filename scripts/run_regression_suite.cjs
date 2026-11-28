@@ -495,6 +495,143 @@ try {
   testsFailed++;
 }
 
+// ── TEST GROUP 7: MODULE FUNCTIONAL PARITY & BUG-FIX GATES ──────────────────
+console.log('\n--- Test Group 7: Module Functional Parity & Hidden Bug-Fix Gates ---');
+try {
+  const g7ServerSource = fs.readFileSync(path.join(__dirname, '..', 'server.ts'), 'utf8');
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+  const portfolioSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'portfolio', 'PublicStudentPortfolioView.tsx'), 'utf8');
+  const globalModalsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'modals', 'GlobalModals.tsx'), 'utf8');
+  const notificationsDrawerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'modals', 'NotificationsDrawer.tsx'), 'utf8');
+  const viewRouterSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'ViewRouter.tsx'), 'utf8');
+  const verificationsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'verifications', 'VerificationsView.tsx'), 'utf8');
+  const codingViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'coding', 'CodingProgressView.tsx'), 'utf8');
+  const classesViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'admin', 'ClassesView.tsx'), 'utf8');
+  const industryApprovalsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'admin', 'IndustryApprovalsView.tsx'), 'utf8');
+  const usersViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'admin', 'UsersView.tsx'), 'utf8');
+  const profileViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'profile', 'StudentProfileView.tsx'), 'utf8');
+  const industryPortalSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'industry', 'IndustryPortalView.tsx'), 'utf8');
+  const studentOppSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'modules', 'opportunities', 'StudentOpportunitiesView.tsx'), 'utf8');
+
+  // 1. PublicStudentPortfolioView prop contract
+  assert(
+    /regNo=\{app\.publicPortfolioRegNo\}/.test(appSource) &&
+    /onBackToApp=\{\(\) => app\.setView\('dashboard'\)\}/.test(appSource) &&
+    /regNo \|\| registerNumber/.test(portfolioSource),
+    'App.tsx and PublicStudentPortfolioView match regNo/onBackToApp props with fallback'
+  );
+
+  // 2. GlobalModals passes inspector profile & export role scope props
+  assert(
+    /onViewStudentProfile=\{\(studentId\) => app\.setViewingStaffStudentProfile\(studentId\)\}/.test(globalModalsSource) &&
+    /isCoordinator=\{app\.isCoordinator\}/.test(globalModalsSource) &&
+    /hodStats=\{app\.hodStats\}/.test(globalModalsSource) &&
+    /myClass=\{app\.myClass\}/.test(globalModalsSource),
+    'GlobalModals passes onViewStudentProfile to SubmissionInspectorModal and role scope props to ExportModal'
+  );
+
+  // 3. NotificationsDrawer does not fall back to unrelated invitations
+  assert(
+    !/\|\| myInvitations\[0\]/.test(notificationsDrawerSource) &&
+    /isTeamInv && matchingInv/.test(notificationsDrawerSource),
+    'NotificationsDrawer strictly binds Accept/Decline actions to matched team invitations'
+  );
+
+  // 4. VerificationsView Review History modal wired end-to-end
+  assert(
+    /reviewsModalSub/.test(verificationsSource) &&
+    /reviewHistoryList/.test(verificationsSource) &&
+    /FloatingModal/.test(verificationsSource) &&
+    /Verification Review History/.test(verificationsSource),
+    'VerificationsView fetches and renders Review History FloatingModal'
+  );
+
+  // 5. ViewRouter syncs CodingProgress platform tabs & IndustryApprovals refresh
+  assert(
+    /codingPlatformTab=\{app\.codingPlatformTab\}/.test(viewRouterSource) &&
+    /onPlatformTabChange=\{app\.setCodingPlatformTab\}/.test(viewRouterSource) &&
+    /onPlatformTabChange\?\.\(tab\)/.test(codingViewSource) &&
+    /onRefresh=\{\(\) => app\.fetchIndustryData\(\)\}/.test(viewRouterSource) &&
+    /onRefresh\?\.\(\)/.test(industryApprovalsSource),
+    'ViewRouter syncs CodingProgress platform tabs and refreshes app industry state on approval'
+  );
+
+  // 6. ClassesView advisor sync & backend class update/delete cache invalidation
+  const postClassesSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf("app.post('/api/classes'"),
+    g7ServerSource.indexOf("app.delete('/api/classes/:id'")
+  );
+  const deleteClassesSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf("app.delete('/api/classes/:id'"),
+    g7ServerSource.indexOf("app.get('/api/users'")
+  );
+  assert(
+    /effectiveName/.test(classesViewSource) &&
+    /Class details updated successfully/.test(classesViewSource) &&
+    /advisor_id = \$1/.test(postClassesSlice) &&
+    /invalidateApiCache\('my_class_'\)/.test(postClassesSlice) &&
+    /invalidateApiCache\('my_class_'\)/.test(deleteClassesSlice),
+    'ClassesView & /api/classes handle advisor updates, missing class_id fallback, and cache invalidation'
+  );
+
+  // 7. Industry revoke resets is_verified=FALSE
+  const industryApproveSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf("app.post('/api/admin/industry/approve/:userId'"),
+    g7ServerSource.indexOf("app.post('/api/industry/postings'")
+  );
+  assert(
+    /is_verified=FALSE,\s*verified_by=NULL,\s*verified_at=NULL/.test(industryApproveSlice),
+    'POST /api/admin/industry/approve/:userId resets is_verified=FALSE on revoke/reject'
+  );
+
+  // 8. Pending student approvals, bootstrap status fields, HOD dept guard & UsersView filters
+  const approveStudentSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf("app.post('/api/advisor/pending-students/:id/approve'"),
+    g7ServerSource.indexOf("app.post('/api/advisor/pending-students/:id/reject'")
+  );
+  const rejectStudentSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf("app.post('/api/advisor/pending-students/:id/reject'"),
+    g7ServerSource.indexOf("app.get('/api/auth/me'")
+  );
+  const bootstrapUsersSlice = g7ServerSource.slice(
+    g7ServerSource.indexOf('const fetchUsers = async'),
+    g7ServerSource.indexOf("getCachedOrQuery('departments_all'")
+  );
+  assert(
+    /invalidateUserAuthCache\(id\)/.test(approveStudentSlice) &&
+    /req\.user\.role === 'HOD'/.test(rejectStudentSlice) &&
+    /invalidateUserAuthCache\(id\)/.test(rejectStudentSlice) &&
+    /u\.status,\s*u\.is_approved,\s*u\.is_active/.test(bootstrapUsersSlice) &&
+    /u\.is_approved === false && u\.status !== 'REJECTED'/.test(usersViewSource) &&
+    /Failed to update coordinator status/.test(usersViewSource) &&
+    /Network error deleting user/.test(usersViewSource),
+    'Bootstrap includes approval status columns; advisor reject guards HOD dept & UsersView excludes REJECTED from pending'
+  );
+
+  // 9. StudentProfileView checks res.ok on deletes and reports add/save errors
+  assert(
+    /Network error removing project/.test(profileViewSource) &&
+    /Network error removing internship/.test(profileViewSource) &&
+    /Network error removing certification/.test(profileViewSource) &&
+    /Network error removing achievement/.test(profileViewSource) &&
+    !/catch \{\s*\}/.test(profileViewSource),
+    'StudentProfileView checks res.ok before delete toasts and eliminates silent catch blocks'
+  );
+
+  // 10. IndustryPortalView & StudentOpportunitiesView handle loading and network errors safely
+  assert(
+    /finally\s*\{\s*setLoading\(false\)/.test(industryPortalSource) &&
+    /Network error creating posting/.test(industryPortalSource) &&
+    /Network error updating application status/.test(industryPortalSource) &&
+    /Network error saving profile/.test(industryPortalSource) &&
+    /finally\s*\{\s*setMatchLoading\(false\)/.test(studentOppSource),
+    'IndustryPortalView and StudentOpportunitiesView wrap async actions in try/catch/finally'
+  );
+} catch (err) {
+  console.error('  [ERROR] Group 7 failed:', err);
+  testsFailed++;
+}
+
 console.log('\n==============================================================');
 console.log(`TOTAL TESTS: ${testsPassed + testsFailed} | PASSED: ${testsPassed} | FAILED: ${testsFailed}`);
 console.log('==============================================================');

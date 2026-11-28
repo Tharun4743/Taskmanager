@@ -14,6 +14,7 @@ import { Input } from '../../components/ui/Input';
 import { Select } from '../../components/ui/Select';
 import { Table, THead, TBody, TR, TH, TD } from '../../components/ui/Table';
 import { getCloudinaryThumbnail } from '../../components/common/helpers';
+import { FloatingModal } from '../../components/modals/FloatingModal';
 import { API_URL } from '../../config';
 import { cn } from '../../lib/utils';
 import type { Submission, Task, Class, Department, User, ToastType, TeamSubmission } from '../../types';
@@ -126,6 +127,9 @@ export function VerificationsView({
   const [selectedSubmissions, setSelectedSubmissions] = useState<(string | number)[]>([]);
   const [verificationNote, setVerificationNote] = useState('');
   const [isBatchVerifying, setIsBatchVerifying] = useState(false);
+  const [reviewsModalSub, setReviewsModalSub] = useState<Submission | null>(null);
+  const [reviewHistoryList, setReviewHistoryList] = useState<any[]>([]);
+  const [loadingReviews, setLoadingReviews] = useState(false);
 
   // Automatically reset page when any filter criteria changes
   useEffect(() => {
@@ -137,6 +141,12 @@ export function VerificationsView({
   };
 
   const fetchReviews = async (subId: number | string) => {
+    const sub = submissions.find(s => String(s.id) === String(subId)) || ({ id: subId } as Submission);
+    if (!onOpenReviewsModal) {
+      setReviewsModalSub(sub);
+      setReviewHistoryList([]);
+      setLoadingReviews(true);
+    }
     try {
       const res = await fetch(`${API_URL}/api/submissions/${subId}/reviews`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -144,11 +154,19 @@ export function VerificationsView({
       if (res.ok) {
         const data = await res.json();
         if (onOpenReviewsModal) {
-          const sub = submissions.find(s => String(s.id) === String(subId));
-          if (sub) onOpenReviewsModal(sub);
+          onOpenReviewsModal(sub);
+        } else {
+          setReviewHistoryList(Array.isArray(data) ? data : []);
         }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast(err.error || 'Failed to load review history', 'error');
       }
-    } catch {}
+    } catch {
+      addToast('Network error loading review history', 'error');
+    } finally {
+      setLoadingReviews(false);
+    }
   };
 
 
@@ -288,6 +306,7 @@ export function VerificationsView({
   };
 
   return (
+    <>
                 <motion.div
                   key="verifications"
                   initial={{ opacity: 0, y: 10 }}
@@ -1307,19 +1326,31 @@ export function VerificationsView({
                                       )}
                                       <Button
                                         variant="ghost"
+                                        className="p-1.5 text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors rounded-lg"
+                                        onClick={() => fetchReviews(s.id)}
+                                        title="Review History"
+                                      >
+                                        <History size={15} />
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
                                         className="p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 transition-colors rounded-lg"
                                         onClick={async () => {
                                           if (confirm('Are you sure you want to delete this submission? This action cannot be undone.')) {
-                                            const res = await fetch(`${API_URL}/api/submissions/${s.id}`, {
-                                              method: 'DELETE',
-                                              headers: { Authorization: `Bearer ${token}` }
-                                            });
-                                            if (res.ok) {
-                                              addToast('Submission deleted', 'info');
-                                              fetchInitialData();
-                                            } else {
-                                              const data = await res.json();
-                                              addToast(data.error || 'Failed to delete submission', 'error');
+                                            try {
+                                              const res = await fetch(`${API_URL}/api/submissions/${s.id}`, {
+                                                method: 'DELETE',
+                                                headers: { Authorization: `Bearer ${token}` }
+                                              });
+                                              if (res.ok) {
+                                                addToast('Submission deleted', 'info');
+                                                fetchInitialData();
+                                              } else {
+                                                const data = await res.json().catch(() => ({}));
+                                                addToast(data.error || 'Failed to delete submission', 'error');
+                                              }
+                                            } catch {
+                                              addToast('Network error deleting submission', 'error');
                                             }
                                           }
                                         }}
@@ -1388,6 +1419,75 @@ export function VerificationsView({
                   </PageLayout>
                 </motion.div>
 
+      <FloatingModal
+        isOpen={Boolean(reviewsModalSub)}
+        onClose={() => { setReviewsModalSub(null); setReviewHistoryList([]); }}
+        title="Verification Review History"
+        description={
+          reviewsModalSub
+            ? `${reviewsModalSub.student_name || 'Student'}${reviewsModalSub.register_number ? ` (${reviewsModalSub.register_number})` : ''}`
+            : ''
+        }
+        icon={<History size={20} className="text-indigo-600" />}
+        maxWidth="xl"
+        footer={
+          <div className="flex justify-end">
+            <Button
+              variant="secondary"
+              onClick={() => { setReviewsModalSub(null); setReviewHistoryList([]); }}
+            >
+              Close
+            </Button>
+          </div>
+        }
+      >
+        {loadingReviews ? (
+          <div className="py-12 flex flex-col items-center justify-center gap-3 text-zinc-500">
+            <Loader2 size={28} className="animate-spin text-indigo-600" />
+            <p className="text-sm font-medium">Loading audit trail...</p>
+          </div>
+        ) : reviewHistoryList.length === 0 ? (
+          <div className="py-10 text-center text-zinc-500 text-sm">
+            No review transitions recorded for this submission yet.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {reviewHistoryList.map((r: any) => (
+              <div
+                key={r.id}
+                className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/50 space-y-1.5"
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
+                      {r.reviewer_name || 'Reviewer'}
+                    </span>
+                    {r.reviewer_role && (
+                      <Badge variant="neutral">{r.reviewer_role}</Badge>
+                    )}
+                  </div>
+                  <span className="text-[11px] font-mono text-zinc-500">
+                    {r.created_at ? new Date(r.created_at).toLocaleString() : ''}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs font-semibold">
+                  <Badge variant="neutral">{r.previous_status || 'PENDING'}</Badge>
+                  <ArrowRight size={12} className="text-zinc-400" />
+                  <Badge variant={r.new_status === 'VERIFIED' ? 'success' : r.new_status === 'REJECTED' ? 'danger' : 'warning'}>
+                    {r.new_status}
+                  </Badge>
+                </div>
+                {r.feedback && (
+                  <p className="text-xs text-zinc-600 dark:text-zinc-300 pt-1 border-t border-zinc-200/70 dark:border-zinc-800">
+                    {r.feedback}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </FloatingModal>
+    </>
   );
 }
 

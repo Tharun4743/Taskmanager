@@ -178,6 +178,8 @@ export function ViewRouter({ app }: { app: any }) {
           departments={app.departments}
           classes={app.classes}
           users={app.users}
+          codingPlatformTab={app.codingPlatformTab}
+          onPlatformTabChange={app.setCodingPlatformTab}
           addToast={app.addToast}
         />
       );
@@ -246,6 +248,7 @@ export function ViewRouter({ app }: { app: any }) {
           user={app.user}
           token={app.token}
           addToast={app.addToast}
+          onRefresh={() => app.fetchIndustryData()}
         />
       );
     case 'profile':

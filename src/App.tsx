@@ -23,7 +23,7 @@ function AppContent() {
   if (app.view === 'public-portfolio' && app.publicPortfolioRegNo) {
     return (
       <Suspense fallback={<ViewLoadingFallback />}>
-        <PublicStudentPortfolioView registerNumber={app.publicPortfolioRegNo} onBack={() => app.setView('dashboard')} />
+        <PublicStudentPortfolioView regNo={app.publicPortfolioRegNo} onBackToApp={() => app.setView('dashboard')} />
       </Suspense>
     );
   }

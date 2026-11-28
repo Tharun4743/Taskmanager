@@ -2388,6 +2388,7 @@ async function startServer() {
     } catch {}
 
     invalidateApiCache('users_');
+    invalidateUserAuthCache(id);
     res.json({ success: true, message: `Student ${student.full_name} (${student.register_number}) approved successfully.` });
   }));
 
@@ -2402,6 +2403,9 @@ async function startServer() {
     if (req.user.role === 'CLASS_ADVISOR' && String(student.class_id) !== String(req.user.class_id)) {
       return res.status(403).json({ error: 'Forbidden: You can only review students from your assigned class.' });
     }
+    if (req.user.role === 'HOD' && String(student.department_id) !== String(req.user.department_id)) {
+      return res.status(403).json({ error: 'Forbidden: You can only review students from your department.' });
+    }
 
     const reason = (rejectionReason || 'Details mismatch with institutional records').trim();
     await pool.query(
@@ -2410,6 +2414,7 @@ async function startServer() {
     );
 
     invalidateApiCache('users_');
+    invalidateUserAuthCache(id);
     res.json({ success: true, message: `Student registration rejected.` });
   }));
 
@@ -2623,10 +2628,18 @@ async function startServer() {
       return res.status(400).json({ error: 'Department ID is required.' });
     }
     if (req.user.role === 'CLASS_ADVISOR') {
-      if (!req.user.class_id) return res.status(400).json({ error: 'No class assigned to advisor' });
-      await pool.query('UPDATE classes SET name = $1, year = $2, batch = $3, updated_at = NOW() WHERE id = $4', [name, year, batch, req.user.class_id]);
+      let targetClassId = req.user.class_id;
+      if (!targetClassId) {
+        const clsLookup = await pool.query('SELECT id FROM classes WHERE advisor_id = $1 LIMIT 1', [req.user.id]);
+        if (clsLookup.rows.length > 0) targetClassId = clsLookup.rows[0].id;
+      }
+      if (!targetClassId) return res.status(400).json({ error: 'No class assigned to advisor' });
+      await pool.query('UPDATE classes SET name = $1, year = $2, batch = $3, updated_at = NOW() WHERE id = $4', [name.trim(), year, batch, targetClassId]);
       invalidateApiCache('classes');
-      return res.json({ id: req.user.class_id, name, year, batch });
+      invalidateApiCache('my_class_');
+      invalidateApiCache('users_');
+      invalidateUserAuthCache();
+      return res.json({ id: targetClassId, name: name.trim(), year, batch });
     }
     const deptId = req.user.role === 'SUPREME_ADMIN' ? department_id : req.user.department_id;
     const newClassRes = await pool.query(
@@ -2635,6 +2648,7 @@ async function startServer() {
     );
     const c = newClassRes.rows[0];
     invalidateApiCache('classes');
+    invalidateApiCache('my_class_');
     res.json({ id: c.id, name: c.name, department_id: deptId, year, batch });
   });
 
@@ -2676,6 +2690,8 @@ async function startServer() {
       await client.query('DELETE FROM classes WHERE id = $1', [classId]);
       await client.query('COMMIT');
       invalidateApiCache('classes');
+      invalidateApiCache('my_class_');
+      invalidateApiCache('users_');
       invalidateUserAuthCache();
     } catch (err) {
       await client.query('ROLLBACK');
@@ -6367,6 +6383,7 @@ async function startServer() {
           if (dbUser.role === 'SUPREME_ADMIN') {
             uRes = await pool.query(`
               SELECT u.id, u.username, u.full_name, u.email, u.role, u.register_number, u.gender, u.is_coordinator,
+                     u.status, u.is_approved, u.is_active,
                      u.department_id, u.class_id, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
                      d.name as department_name, c.name as class_name, c.year as class_year
               FROM users u
@@ -6378,9 +6395,11 @@ async function startServer() {
           } else if (dbUser.role === 'HOD') {
             uRes = await pool.query(`
               SELECT u.id, u.username, u.full_name, u.email, u.role, u.register_number, u.gender, u.is_coordinator,
+                     u.status, u.is_approved, u.is_active,
                      u.department_id, u.class_id, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
-                     c.name as class_name, c.year as class_year
+                     d.name as department_name, c.name as class_name, c.year as class_year
               FROM users u
+              LEFT JOIN departments d ON u.department_id = d.id
               LEFT JOIN classes c ON u.class_id = c.id
               WHERE u.department_id = $1 AND u.role != 'SUPREME_ADMIN'
               ORDER BY u.role ASC, c.year ASC NULLS LAST, c.name ASC NULLS LAST, u.register_number ASC NULLS LAST, u.full_name ASC
@@ -6394,6 +6413,7 @@ async function startServer() {
             if (cid) {
               uRes = await pool.query(`
                 SELECT u.id, u.username, u.full_name, u.email, u.role, u.register_number, u.gender, u.is_coordinator,
+                       u.status, u.is_approved, u.is_active,
                        u.department_id, u.class_id, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
                        c.name as class_name, c.year as class_year
                 FROM users u
@@ -6407,6 +6427,7 @@ async function startServer() {
           } else if (isIndustryUser(dbUser)) {
             uRes = await pool.query(`
               SELECT u.id, u.username, u.full_name, u.email, u.role, u.register_number, u.gender,
+                     u.status, u.is_approved, u.is_active,
                      u.department_id, u.class_id, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
                      d.name as department_name, c.name as class_name, c.year as class_year
               FROM users u
@@ -6419,6 +6440,7 @@ async function startServer() {
             if (dbUser.class_id) {
               uRes = await pool.query(`
                 SELECT u.id, u.full_name, u.register_number, u.role, u.class_id, u.department_id, u.gender, u.is_coordinator,
+                       u.status, u.is_approved, u.is_active,
                        c.name as class_name, c.year as class_year
                 FROM users u
                 LEFT JOIN classes c ON u.class_id = c.id
@@ -13352,7 +13374,7 @@ async function startServer() {
       invalidateUserAuthCache(userId);
       res.json({ message: 'Industry account approved' });
     } else {
-      await pool.query(`UPDATE company_profiles SET rejection_reason=$1, updated_at=NOW() WHERE user_id=$2`, [rejection_reason || 'Not approved', userId]);
+      await pool.query(`UPDATE company_profiles SET is_verified=FALSE, verified_by=NULL, verified_at=NULL, rejection_reason=$1, updated_at=NOW() WHERE user_id=$2`, [rejection_reason || 'Not approved', userId]);
       await pool.query(`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, 'INDUSTRY_REJECTED')`, [userId, `Your industry registration was not approved. Reason: ${rejection_reason || 'Not specified'}`]);
       invalidateApiCache('industry_');
       invalidateUserAuthCache(userId);

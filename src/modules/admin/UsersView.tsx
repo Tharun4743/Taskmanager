@@ -88,6 +88,9 @@ export function UsersView({
       if (res.ok) {
         addToast(currentStatus ? 'Coordinator role revoked' : 'User assigned as Coordinator', 'success');
         onRefresh();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || 'Failed to update coordinator status', 'error');
       }
     } catch {
       addToast('Failed to update coordinator status', 'error');
@@ -339,7 +342,7 @@ export function UsersView({
                         <div className="flex flex-col md:flex-row gap-4 w-full md:w-auto">
                           <div className="bg-zinc-100 p-1 rounded-xl flex">
                             {(['ALL', 'COORDINATORS', 'PENDING'] as const).map(filter => {
-                              const pendingCount = users.filter(u => u.role === 'STUDENT' && (u.status === 'PENDING_APPROVAL' || u.is_approved === false)).length;
+                              const pendingCount = users.filter(u => u.role === 'STUDENT' && (u.status === 'PENDING_APPROVAL' || (u.is_approved === false && u.status !== 'REJECTED'))).length;
                               return (
                                 <button
                                   key={filter}
@@ -461,7 +464,7 @@ export function UsersView({
                               }
                               if (isAdvisor) {
                                 if (studentFilter === 'COORDINATORS') return u.is_coordinator;
-                                if (studentFilter === 'PENDING') return u.status === 'PENDING_APPROVAL' || u.is_approved === false;
+                                if (studentFilter === 'PENDING') return u.status === 'PENDING_APPROVAL' || (u.is_approved === false && u.status !== 'REJECTED');
                               } else if (isHOD) {
                                 if (studentFilter === 'CLASS_ADVISOR') return u.role === 'CLASS_ADVISOR';
                                 if (studentFilter === 'STUDENT') return u.role === 'STUDENT';
@@ -520,7 +523,7 @@ export function UsersView({
                                       {!!u.is_coordinator && (
                                         <Badge variant="warning">Class Coord</Badge>
                                       )}
-                                      {(u.status === 'PENDING_APPROVAL' || u.is_approved === false) && (
+                                      {(u.status === 'PENDING_APPROVAL' || (u.is_approved === false && u.status !== 'REJECTED')) && (
                                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800 flex items-center gap-1">
                                           ⏳ Pending Approval
                                         </span>
@@ -558,7 +561,7 @@ export function UsersView({
                                   )}
                                   <TD className="text-right">
                                     <div className="flex justify-end items-center gap-1.5 flex-wrap">
-                                      {(isAdvisor || isHOD || isAdmin) && u.role === 'STUDENT' && (u.status === 'PENDING_APPROVAL' || u.is_approved === false) && (
+                                      {(isAdvisor || isHOD || isAdmin) && u.role === 'STUDENT' && (u.status === 'PENDING_APPROVAL' || (u.is_approved === false && u.status !== 'REJECTED')) && (
                                         <>
                                           <Button
                                             variant="outline"
@@ -621,13 +624,17 @@ export function UsersView({
                                           onClick={async () => {
                                             const roleLabel = u.role === 'CLASS_ADVISOR' ? 'Advisor' : u.role === 'HOD' ? 'HOD' : 'User';
                                             if (confirm(`Delete ${roleLabel} ${u.full_name}? This cannot be undone.`)) {
-                                              const res = await fetch(`${API_URL}/api/users/${u.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-                                              if (res.ok) {
-                                                fetchInitialData();
-                                                addToast(`${roleLabel} deleted successfully.`, 'success');
-                                              } else {
-                                                const data = await res.json();
-                                                addToast(data.error || 'Failed to delete user', 'error');
+                                              try {
+                                                const res = await fetch(`${API_URL}/api/users/${u.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                                                if (res.ok) {
+                                                  fetchInitialData();
+                                                  addToast(`${roleLabel} deleted successfully.`, 'success');
+                                                } else {
+                                                  const data = await res.json().catch(() => ({}));
+                                                  addToast(data.error || 'Failed to delete user', 'error');
+                                                }
+                                              } catch {
+                                                addToast('Network error deleting user', 'error');
                                               }
                                             }
                                           }}

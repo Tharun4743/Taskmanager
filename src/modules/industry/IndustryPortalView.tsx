@@ -117,8 +117,19 @@ export default function IndustryPortalView({
 
   const fetchApplications = useCallback(async (id: string) => {
     setLoading(true);
-    const r = await fetch(`${API}/api/industry/postings/${id}/applications`, { headers: h });
-    if (r.ok) setApplications(await r.json()); setLoading(false);
+    try {
+      const r = await fetch(`${API}/api/industry/postings/${id}/applications`, { headers: h });
+      if (r.ok) {
+        setApplications(await r.json());
+      } else {
+        const d = await r.json().catch(() => ({}));
+        showToast(d.error || 'Failed to load applications');
+      }
+    } catch {
+      showToast('Network error loading applications');
+    } finally {
+      setLoading(false);
+    }
   }, [token]);
 
   const fetchReportPreview = useCallback(async (selectedType?: string) => {
@@ -194,16 +205,29 @@ export default function IndustryPortalView({
   useEffect(() => { if (tab === 'reports') fetchReportPreview(); }, [tab, reportType]);
 
   const submitPosting = async () => {
-    const r = await fetch(`${API}/api/industry/postings`, { method:'POST', headers: h, body: JSON.stringify({ ...postingForm, min_cgpa: parseFloat(postingForm.min_cgpa)||0, total_seats: postingForm.total_seats ? parseInt(postingForm.total_seats) : null }) });
-    const d = await r.json();
-    if (r.ok) { showToast('Posting created!'); setShowPostingForm(false); fetchPostings(); setPostingForm({ posting_type:'INTERNSHIP', title:'', description:'', location:'', mode:'Hybrid', stipend_or_salary:'', duration:'', min_cgpa:'0', total_seats:'', application_deadline:'', eligibility_notes:'', required_skills:[] }); }
-    else showToast(d.error || 'Failed to create posting');
+    try {
+      const r = await fetch(`${API}/api/industry/postings`, { method:'POST', headers: h, body: JSON.stringify({ ...postingForm, min_cgpa: parseFloat(postingForm.min_cgpa)||0, total_seats: postingForm.total_seats ? parseInt(postingForm.total_seats) : null }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) { showToast('Posting created!'); setShowPostingForm(false); fetchPostings(); setPostingForm({ posting_type:'INTERNSHIP', title:'', description:'', location:'', mode:'Hybrid', stipend_or_salary:'', duration:'', min_cgpa:'0', total_seats:'', application_deadline:'', eligibility_notes:'', required_skills:[] }); }
+      else showToast(d.error || 'Failed to create posting');
+    } catch {
+      showToast('Network error creating posting');
+    }
   };
 
   const updateAppStatus = async (appId: string, status: string) => {
-    const r = await fetch(`${API}/api/industry/applications/${appId}/status`, { method:'PUT', headers: h, body: JSON.stringify({ status }) });
-    if (r.ok) { showToast(`Application ${status.toLowerCase()}`); if (selectedPosting) fetchApplications(selectedPosting.id); }
-    else showToast('Update failed');
+    try {
+      const r = await fetch(`${API}/api/industry/applications/${appId}/status`, { method:'PUT', headers: h, body: JSON.stringify({ status }) });
+      if (r.ok) {
+        showToast(`Application ${status.toLowerCase()}`);
+        if (selectedPosting) fetchApplications(selectedPosting.id);
+      } else {
+        const d = await r.json().catch(() => ({}));
+        showToast(d.error || 'Update failed');
+      }
+    } catch {
+      showToast('Network error updating application status');
+    }
   };
 
   const addSkill = () => {
@@ -670,7 +694,7 @@ export default function IndustryPortalView({
               <label style={c.lbl}>Company Description</label>
               <textarea style={{ ...c.inp, minHeight:100, resize:'vertical' }} value={profileForm.description||''} onChange={e => setProfileForm(p=>({...p,description:e.target.value}))} />
             </div>
-            <button style={c.btn('#0f172a')} onClick={async()=>{ const r=await fetch(`${API}/api/industry/profile`,{method:'PUT',headers:h,body:JSON.stringify(profileForm)}); if(r.ok){showToast('Profile saved!');fetchProfile();}else showToast('Save failed'); }}>Save Profile</button>
+            <button style={c.btn('#0f172a')} onClick={async()=>{ try { const r=await fetch(`${API}/api/industry/profile`,{method:'PUT',headers:h,body:JSON.stringify(profileForm)}); if(r.ok){showToast('Profile saved!');fetchProfile();}else{const d=await r.json().catch(()=>({}));showToast(d.error||'Save failed');} } catch { showToast('Network error saving profile'); } }}>Save Profile</button>
           </div>
         </>}
       </div>

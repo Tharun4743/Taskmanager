@@ -69,8 +69,8 @@ export function NotificationsDrawer({
           notifications.map(n => {
             const matchingInv = myInvitations.find(inv =>
               n.message.includes(inv.team_name) || n.message.includes(inv.task_title)
-            ) || myInvitations[0];
-            const isTeamInv = n.type === 'TEAM_INVITATION' || n.message.toLowerCase().includes('invited');
+            );
+            const isTeamInv = (n.type === 'TEAM_INVITATION' || n.message.toLowerCase().includes('invited')) && Boolean(matchingInv);
             return (
               <div
                 key={n.id}
@@ -114,17 +114,17 @@ export function NotificationsDrawer({
                       </button>
                     )}
                   </div>
-                  {isTeamInv && myInvitations.length > 0 && (
+                  {isTeamInv && matchingInv && (
                     <div className="flex items-center gap-2 mt-2 pt-2 border-t border-indigo-200/50 dark:border-indigo-800/50">
                       <Button
-                        onClick={(e) => { e.stopPropagation(); handleRespondInvitation((matchingInv || myInvitations[0]).id, 'ACCEPT'); }}
+                        onClick={(e) => { e.stopPropagation(); handleRespondInvitation(matchingInv.id, 'ACCEPT'); }}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold px-3 py-1 h-auto rounded-lg shadow-sm"
                       >
                         Accept
                       </Button>
                       <Button
                         variant="ghost"
-                        onClick={(e) => { e.stopPropagation(); handleRespondInvitation((matchingInv || myInvitations[0]).id, 'DECLINE'); }}
+                        onClick={(e) => { e.stopPropagation(); handleRespondInvitation(matchingInv.id, 'DECLINE'); }}
                         className="bg-zinc-200 hover:bg-zinc-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 text-[11px] font-bold px-3 py-1 h-auto rounded-lg"
                       >
                         Decline

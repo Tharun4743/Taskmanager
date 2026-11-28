@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Plus, Trash2, Building2, ClipboardList, Users, Download, Loader2 } from 'lucide-react';
 import { PageLayout } from '../../components/layout/PageLayout';
@@ -37,17 +37,35 @@ export function ClassesView({
   addToast = () => {},
 }: ClassesViewProps) {
   const [newClass, setNewClass] = useState({
-    name: '',
-    year: '',
-    batch: '',
+    name: isAdvisorMode && myClass?.name ? String(myClass.name) : '',
+    year: isAdvisorMode && myClass?.year ? String(myClass.year) : '',
+    batch: isAdvisorMode && myClass?.batch ? String(myClass.batch) : '',
     department_id: user?.department_id ? String(user.department_id) : (departments[0]?.id ? String(departments[0].id) : ''),
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExportingBulkResumes, setIsExportingBulkResumes] = useState(false);
 
+  useEffect(() => {
+    if (isAdvisorMode && myClass) {
+      setNewClass(prev => ({
+        ...prev,
+        name: myClass.name ? String(myClass.name) : '',
+        year: myClass.year ? String(myClass.year) : '',
+        batch: myClass.batch ? String(myClass.batch) : '',
+        department_id: myClass.department_id ? String(myClass.department_id) : prev.department_id,
+      }));
+    }
+  }, [isAdvisorMode, myClass?.id, myClass?.name, myClass?.year, myClass?.batch, myClass?.department_id]);
+
   const createClass = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newClass.name.trim() || !newClass.year || !newClass.batch) return;
+    const effectiveName = (newClass.name || (isAdvisorMode ? myClass?.name : '') || '').trim();
+    const effectiveYear = String(newClass.year || (isAdvisorMode ? myClass?.year : '') || '').trim();
+    const effectiveBatch = String(newClass.batch || (isAdvisorMode ? myClass?.batch : '') || '').trim();
+    if (!effectiveName || !effectiveYear || !effectiveBatch) {
+      addToast('Class name, year, and batch are required', 'error');
+      return;
+    }
     setIsSubmitting(true);
     try {
       const res = await fetch(`${API_URL}/api/classes`, {
@@ -57,27 +75,29 @@ export function ClassesView({
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: newClass.name,
-          year: parseInt(newClass.year, 10),
-          batch: newClass.batch,
+          name: effectiveName,
+          year: parseInt(effectiveYear, 10),
+          batch: effectiveBatch,
           department_id: isAdmin ? newClass.department_id : user?.department_id,
         }),
       });
       if (res.ok) {
-        setNewClass({
-          name: '',
-          year: '',
-          batch: '',
-          department_id: user?.department_id ? String(user.department_id) : (departments[0]?.id ? String(departments[0].id) : ''),
-        });
-        addToast('Class section created successfully', 'success');
+        if (!isAdvisorMode) {
+          setNewClass({
+            name: '',
+            year: '',
+            batch: '',
+            department_id: user?.department_id ? String(user.department_id) : (departments[0]?.id ? String(departments[0].id) : ''),
+          });
+        }
+        addToast(isAdvisorMode ? 'Class details updated successfully' : 'Class section created successfully', 'success');
         onRefresh();
       } else {
         const data = await res.json().catch(() => ({}));
-        addToast(data.error || 'Failed to create class section', 'error');
+        addToast(data.error || (isAdvisorMode ? 'Failed to update class details' : 'Failed to create class section'), 'error');
       }
     } catch {
-      addToast('Network error while creating class section', 'error');
+      addToast(isAdvisorMode ? 'Network error while updating class details' : 'Network error while creating class section', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -183,7 +203,7 @@ export function ClassesView({
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-zinc-500 uppercase">Class Name</label>
                   <Input
-                    value={newClass.name !== undefined && newClass.name !== '' ? newClass.name : (myClass?.name || '')}
+                    value={newClass.name}
                     onChange={e => setNewClass(prev => ({ ...prev, name: e.target.value }))}
                     required
                   />
@@ -192,7 +212,7 @@ export function ClassesView({
                   <label className="text-xs font-bold text-zinc-500 uppercase">Year</label>
                   <Input
                     type="number"
-                    value={newClass.year !== undefined && newClass.year !== '' ? newClass.year : (myClass?.year || '')}
+                    value={newClass.year}
                     onChange={e => setNewClass(prev => ({ ...prev, year: e.target.value }))}
                     required
                   />
@@ -200,7 +220,7 @@ export function ClassesView({
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-zinc-500 uppercase">Batch</label>
                   <Input
-                    value={newClass.batch !== undefined && newClass.batch !== '' ? newClass.batch : (myClass?.batch || '')}
+                    value={newClass.batch}
                     onChange={e => setNewClass(prev => ({ ...prev, batch: e.target.value }))}
                     required
                   />

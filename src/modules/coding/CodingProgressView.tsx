@@ -27,6 +27,8 @@ export interface CodingProgressViewProps {
   departments: Department[];
   classes: Class[];
   users: User[];
+  codingPlatformTab?: 'LEETCODE' | 'GITHUB';
+  onPlatformTabChange?: (tab: 'LEETCODE' | 'GITHUB') => void;
   addToast?: (msg: string, type?: ToastType) => void;
 }
 
@@ -36,6 +38,8 @@ export function CodingProgressView({
   departments,
   classes,
   users,
+  codingPlatformTab: externalPlatformTab,
+  onPlatformTabChange,
   addToast = () => {},
 }: CodingProgressViewProps) {
   const isAdmin = user?.role === 'SUPREME_ADMIN';
@@ -98,7 +102,16 @@ export function CodingProgressView({
   }, [user?.id, user?.role, user?.department_id, user?.class_id, user?.is_coordinator, classes.length]);
 
   // GitHub & Combined Progress Tracking State
-  const [codingPlatformTab, setCodingPlatformTab] = useState<'LEETCODE' | 'GITHUB'>(() => (typeof window !== 'undefined' ? 'LEETCODE' : 'LEETCODE'));
+  const [codingPlatformTab, setLocalCodingPlatformTab] = useState<'LEETCODE' | 'GITHUB'>(() => externalPlatformTab || 'LEETCODE');
+  useEffect(() => {
+    if (externalPlatformTab) {
+      setLocalCodingPlatformTab(externalPlatformTab);
+    }
+  }, [externalPlatformTab]);
+  const setCodingPlatformTab = (tab: 'LEETCODE' | 'GITHUB') => {
+    setLocalCodingPlatformTab(tab);
+    onPlatformTabChange?.(tab);
+  };
   const [myGithubProgress, setMyGithubProgress] = useState<any>(null);
   const [githubStats, setGithubStats] = useState<any>(null);
   const [githubProgressList, setGithubProgressList] = useState<any[]>([]);

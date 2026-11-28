@@ -77,6 +77,7 @@ export function GlobalModals({ app }: { app: any }) {
           onSelectSubmission={(sub) => app.setInspectingSubmission(sub)}
           verifySubmission={(id, status, note, reason) => app.verifySubmission(id, status, note, reason)}
           onOpenProofPreview={(data) => app.setProofPreviewData(data)}
+          onViewStudentProfile={(studentId) => app.setViewingStaffStudentProfile(studentId)}
         />
       )}
 
@@ -160,6 +161,9 @@ export function GlobalModals({ app }: { app: any }) {
           isAdmin={app.isAdmin}
           isHOD={app.isHOD}
           isAdvisor={app.isAdvisor}
+          isCoordinator={app.isCoordinator}
+          hodStats={app.hodStats}
+          myClass={app.myClass}
           departments={app.departments}
           classes={app.classes}
           tasks={app.tasks}
