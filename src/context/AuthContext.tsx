@@ -30,6 +30,9 @@ export const AuthProvider: React.FC<{
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       sessionStorage.removeItem('app_cache_tasks');
+      sessionStorage.removeItem('app_cache_submissions');
+      sessionStorage.removeItem('app_cache_users');
+      sessionStorage.removeItem('app_cache_notifs');
     } catch {}
     setToken(null);
     setUser(null);
@@ -40,8 +43,9 @@ export const AuthProvider: React.FC<{
   const isHOD = user?.role === 'HOD';
   const isAdvisor = user?.role === 'CLASS_ADVISOR';
   const isStudent = user?.role === 'STUDENT';
-  const isCoordinator = Boolean(user?.is_coordinator);
-  const isIndustry = user?.role === 'INDUSTRY';
+  const isCoordinator = Boolean(user?.role === 'STUDENT' && user?.is_coordinator);
+  const isFaculty = user?.role === 'FACULTY' || user?.role === 'STAFF';
+  const isIndustry = user?.role === 'INDUSTRY' || user?.role === 'INDUSTRY_GUEST';
 
   return (
     <AuthContext.Provider

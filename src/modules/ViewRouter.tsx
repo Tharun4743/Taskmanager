@@ -1,6 +1,8 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useEffect } from 'react';
+import { ShieldAlert } from 'lucide-react';
 import { ViewLoadingFallback } from '../components/common/ViewLoadingFallback';
 import { lazyWithRetry } from '../components/common/helpers';
+import { canAccessView, getDefaultViewForUser } from '../lib/rbac';
 
 // Modular Feature Views
 import { DashboardView } from './dashboard/DashboardView';
@@ -28,6 +30,44 @@ const InstitutionalSkillHeatmapView = lazyWithRetry(() => import('./analytics/In
 const IndustryPortalView = lazyWithRetry(() => import('./industry/IndustryPortalView'));
 
 export function ViewRouter({ app }: { app: any }) {
+  const isFooterRoute = app.view === 'privacy' || app.view === 'terms' || app.view === 'support';
+  const hasViewAccess = isFooterRoute || canAccessView(app.user, app.view);
+
+  useEffect(() => {
+    if (isFooterRoute && app.footerModal !== app.view.toUpperCase()) {
+      app.setFooterModal(app.view.toUpperCase());
+    }
+  }, [isFooterRoute, app.view, app.footerModal, app]);
+
+  useEffect(() => {
+    if (app.user && !hasViewAccess) {
+      app.setView(getDefaultViewForUser(app.user));
+    }
+  }, [app.user, hasViewAccess, app]);
+
+  if (app.user && !hasViewAccess) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] p-6 text-center space-y-4">
+        <div className="w-14 h-14 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+          <ShieldAlert size={28} />
+        </div>
+        <div className="space-y-1 max-w-md">
+          <h2 className="text-lg font-extrabold text-zinc-900 dark:text-white">Access Restricted</h2>
+          <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400">
+            This portal view is outside your active role permissions. Redirecting you to your workspace home...
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => app.setView(getDefaultViewForUser(app.user))}
+          className="px-4 py-2.5 rounded-xl bg-black text-white text-xs font-bold hover:bg-zinc-800 transition-colors"
+        >
+          Return to Portal Home
+        </button>
+      </div>
+    );
+  }
+
   switch (app.view) {
     case 'dashboard':
       return (
@@ -104,7 +144,10 @@ export function ViewRouter({ app }: { app: any }) {
           onInspectSubmission={app.setInspectingSubmission}
           onOpenRejectionModal={app.setShowRejectionModal}
           onOpenTeamReviewModal={app.setTeamReviewModal}
-          onRefresh={app.fetchSubmissions}
+          onRefresh={() => {
+            app.fetchSubmissions();
+            app.fetchTeamSubmissions?.();
+          }}
           addToast={app.addToast}
         />
       );
@@ -118,6 +161,12 @@ export function ViewRouter({ app }: { app: any }) {
           isAdvisor={app.isAdvisor}
           isCoordinator={app.isCoordinator}
           verifySubmission={app.verifySubmission}
+          onOpenRejectionModal={(idOrSub) => {
+            const found = typeof idOrSub === 'object'
+              ? idOrSub
+              : app.submissions.find((s: any) => String(s.id) === String(idOrSub)) || ({ id: idOrSub } as any);
+            app.setShowRejectionModal(found);
+          }}
         />
       );
     case 'leetcode-targets':
@@ -260,10 +309,6 @@ export function ViewRouter({ app }: { app: any }) {
     case 'privacy':
     case 'terms':
     case 'support': {
-      // Trigger corresponding modal and display Dashboard backdrop seamlessly
-      if (app.footerModal !== app.view.toUpperCase()) {
-        setTimeout(() => app.setFooterModal(app.view.toUpperCase()), 0);
-      }
       return (
         <DashboardView
           user={app.user}

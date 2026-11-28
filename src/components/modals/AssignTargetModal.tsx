@@ -67,7 +67,7 @@ export function AssignTargetModal({
                 targetValue: '', // Reset child selection on parent change
               }));
             }}
-            className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
+            className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
           >
             <option value="">Select Target Scope</option>
             {!isAdv && <option value="DEPARTMENT">Department-wide</option>}
@@ -87,7 +87,7 @@ export function AssignTargetModal({
               <select
                 value={assignTargetForm.targetValue}
                 onChange={(e) => setAssignTargetForm(prev => ({ ...prev, targetValue: e.target.value }))}
-                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
+                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
                 required
               >
                 <option value="">Select Department</option>
@@ -101,7 +101,7 @@ export function AssignTargetModal({
               <select
                 value={assignTargetForm.targetValue}
                 onChange={(e) => setAssignTargetForm(prev => ({ ...prev, targetValue: e.target.value }))}
-                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
+                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
                 required
               >
                 <option value="">Select Year / Batch</option>
@@ -116,7 +116,7 @@ export function AssignTargetModal({
               <select
                 value={assignTargetForm.targetValue}
                 onChange={(e) => setAssignTargetForm(prev => ({ ...prev, targetValue: e.target.value }))}
-                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
+                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
                 required
               >
                 <option value="">Select Class Section</option>
@@ -130,7 +130,7 @@ export function AssignTargetModal({
               <select
                 value={assignTargetForm.targetValue}
                 onChange={(e) => setAssignTargetForm(prev => ({ ...prev, targetValue: e.target.value }))}
-                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
+                className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820] cursor-pointer"
                 required
               >
                 <option value="">Select Individual Student</option>
@@ -143,7 +143,7 @@ export function AssignTargetModal({
         )}
 
         {/* Targets */}
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">Daily Target</label>
             <input
@@ -159,7 +159,7 @@ export function AssignTargetModal({
                   weeklyTarget: String(parsed * 7),
                 }));
               }}
-              className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820]"
+              className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820]"
             />
           </div>
           <div>
@@ -169,7 +169,7 @@ export function AssignTargetModal({
               min="0"
               value={assignTargetForm.weeklyTarget}
               onChange={(e) => setAssignTargetForm(prev => ({ ...prev, weeklyTarget: e.target.value }))}
-              className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820]"
+              className="w-full p-2.5 border border-zinc-200 dark:border-zinc-800 rounded-xl text-base sm:text-sm font-semibold text-zinc-700 dark:text-zinc-200 focus:outline-none bg-white dark:bg-[#181820]"
             />
           </div>
         </div>

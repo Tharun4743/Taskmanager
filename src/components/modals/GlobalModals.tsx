@@ -83,13 +83,16 @@ export function GlobalModals({ app }: { app: any }) {
       {app.showRejectionModal && (
         <RejectionModal
           isOpen={Boolean(app.showRejectionModal)}
-          submission={app.showRejectionModal}
+          submission={typeof app.showRejectionModal === 'object' ? app.showRejectionModal : null}
           rejectionReason={app.rejectionReason}
           setRejectionReason={app.setRejectionReason}
           onClose={() => app.setShowRejectionModal(null)}
           onConfirm={() => {
             if (app.showRejectionModal) {
-              app.verifySubmission(app.showRejectionModal.id, 'REJECTED', undefined, app.rejectionReason);
+              const targetId = typeof app.showRejectionModal === 'object'
+                ? app.showRejectionModal.id
+                : app.showRejectionModal;
+              app.verifySubmission(targetId, 'REJECTED', undefined, app.rejectionReason);
             }
           }}
         />
@@ -197,30 +200,32 @@ export function GlobalModals({ app }: { app: any }) {
             priority: app.noticeForm.priority,
             scope: app.noticeForm.scope,
             class_id: app.noticeForm.target_class_id,
+            class_ids: app.noticeForm.class_ids || [],
             department_id: app.noticeForm.target_dept_id
           }}
           setNoticeForm={(val: any) => {
-            if (typeof val === 'function') {
-              app.setNoticeForm((prev: any) => {
-                const updated = val({
-                  title: prev.title,
-                  description: prev.content,
-                  priority: prev.priority,
-                  scope: prev.scope,
-                  class_id: prev.target_class_id,
-                  department_id: prev.target_dept_id
-                });
-                return {
-                  ...prev,
-                  title: updated.title,
-                  content: updated.description,
-                  priority: updated.priority,
-                  scope: updated.scope,
-                  target_class_id: updated.class_id,
-                  target_dept_id: updated.department_id
-                };
-              });
-            }
+            app.setNoticeForm((prev: any) => {
+              const currentBridge = {
+                title: prev.title,
+                description: prev.content,
+                priority: prev.priority,
+                scope: prev.scope,
+                class_id: prev.target_class_id,
+                class_ids: prev.class_ids || [],
+                department_id: prev.target_dept_id
+              };
+              const updated = typeof val === 'function' ? val(currentBridge) : val;
+              return {
+                ...prev,
+                title: updated.title ?? prev.title,
+                content: updated.description ?? prev.content,
+                priority: updated.priority ?? prev.priority,
+                scope: updated.scope ?? prev.scope,
+                target_class_id: updated.class_id ?? '',
+                class_ids: updated.class_ids ?? [],
+                target_dept_id: updated.department_id ?? ''
+              };
+            });
           }}
           noticeFile={app.noticeAttachment}
           setNoticeFile={app.setNoticeAttachment}

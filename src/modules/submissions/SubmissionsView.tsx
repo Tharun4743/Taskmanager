@@ -15,7 +15,8 @@ export interface SubmissionsViewProps {
   isHOD: boolean;
   isAdvisor: boolean;
   isCoordinator: boolean;
-  verifySubmission?: (id: string | number, status: string) => void;
+  verifySubmission?: (id: string | number, status: string, customNote?: string, customReason?: string) => void;
+  onOpenRejectionModal?: (id: string | number) => void;
 }
 
 export function SubmissionsView({
@@ -26,6 +27,7 @@ export function SubmissionsView({
   isAdvisor,
   isCoordinator,
   verifySubmission = () => {},
+  onOpenRejectionModal,
 }: SubmissionsViewProps) {
   const userSubmissions = useMemo(() => {
     if (!user) return [];
@@ -123,7 +125,7 @@ export function SubmissionsView({
                     )}
                   </div>
 
-                  {(isHOD || isAdmin || isAdvisor || isCoordinator) && sub.status === 'SUBMITTED' && (
+                  {(isHOD || isAdmin || isAdvisor || (isCoordinator && String(sub.user_id) !== String(user?.id))) && sub.status === 'SUBMITTED' && (
                     <div className="flex gap-2 mt-4">
                       <Button
                         variant="success"
@@ -135,10 +137,15 @@ export function SubmissionsView({
                       <Button
                         variant="danger"
                         className="flex-1 flex items-center justify-center gap-2 cursor-pointer"
-                        onClick={() => verifySubmission(sub.id, 'REJECTED')}
+                        onClick={() => onOpenRejectionModal ? onOpenRejectionModal(sub.id) : verifySubmission(sub.id, 'REJECTED', undefined, 'Submission does not satisfy criteria')}
                       >
                         <XCircle size={18} /> Reject
                       </Button>
+                    </div>
+                  )}
+                  {isCoordinator && String(sub.user_id) === String(user?.id) && sub.status === 'SUBMITTED' && (
+                    <div className="mt-4 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                      Self-verification disabled: pending Class Advisor or HOD review.
                     </div>
                   )}
 

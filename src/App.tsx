@@ -7,10 +7,12 @@ import { useAppData } from './hooks/useAppData';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { Footer } from './components/layout/Footer';
+import { MobileBottomNav } from './components/layout/MobileBottomNav';
 import { ToastContainer } from './components/ui/Toast';
 import { AuthView } from './modules/auth/AuthView';
 import { ViewRouter } from './modules/ViewRouter';
 import { GlobalModals } from './components/modals/GlobalModals';
+import { getDefaultViewForUser } from './lib/rbac';
 
 const PublicStudentPortfolioView = lazyWithRetry(() => import('./modules/portfolio/PublicStudentPortfolioView'));
 
@@ -39,7 +41,7 @@ function AppContent() {
               localStorage.setItem('token', tok);
               localStorage.setItem('user', JSON.stringify(usr));
             } catch {}
-            app.setView('dashboard');
+            app.setView(getDefaultViewForUser(usr));
           }}
           onToast={app.addToast}
         />
@@ -49,7 +51,7 @@ function AppContent() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white">
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-white">
       <Sidebar
         view={app.view}
         setView={app.setView}
@@ -96,7 +98,7 @@ function AppContent() {
           setShowTelegramLinkModal={app.setShowTelegramLinkModal}
         />
 
-        <main className="flex-1 min-h-0 relative bg-[#F5F5F4] dark:bg-[#0f0f12] overflow-y-auto flex flex-col">
+        <main className="flex-1 min-h-0 relative bg-[#F5F5F4] dark:bg-[#0f0f12] overflow-y-auto flex flex-col pb-20 lg:pb-0">
           <div className="flex-1 w-full flex flex-col">
             <ErrorBoundary fallbackTitle="Portal View Error">
               <Suspense fallback={<ViewLoadingFallback />}>
@@ -108,6 +110,14 @@ function AppContent() {
           <Footer onShowModal={(modalType) => app.setFooterModal(modalType)} />
         </main>
       </div>
+
+      <MobileBottomNav
+        currentView={app.view}
+        onSelectView={app.setView}
+        user={app.user}
+        pendingVerificationCount={app.pendingVerificationCount}
+        onLogout={app.handleLogout}
+      />
 
       <GlobalModals app={app} />
       <ToastContainer toasts={app.toasts} removeToast={app.removeToast} />

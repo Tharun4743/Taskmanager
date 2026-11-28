@@ -56,7 +56,7 @@ export function RejectionModal({
             value={rejectionReason}
             onChange={e => setRejectionReason(e.target.value)}
             required
-            className="text-xs min-h-[90px]"
+            className="min-h-[90px]"
           />
         </div>
 

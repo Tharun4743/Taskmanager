@@ -38,7 +38,7 @@ export function ExtendDeadlineModal({
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
-          className="bg-white dark:bg-[#181820] rounded-2xl p-6 md:p-8 w-full max-w-md shadow-2xl space-y-4 cursor-default border border-zinc-100 dark:border-zinc-800"
+          className="bg-white dark:bg-[#181820] rounded-2xl p-6 md:p-8 w-full max-w-md shadow-2xl space-y-4 cursor-default border border-zinc-100 dark:border-zinc-800 max-h-[90vh] overflow-y-auto custom-scrollbar"
         >
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-black text-zinc-900 dark:text-zinc-100 flex items-center gap-2">

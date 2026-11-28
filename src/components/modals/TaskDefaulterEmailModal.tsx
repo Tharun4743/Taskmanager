@@ -54,9 +54,9 @@ export function TaskDefaulterEmailModal({
       isOpen={Boolean(emailAlertTask)}
       onClose={onClose}
       title="Send Pending Submission Alert"
-      subtitle={`Dispatches official academic reminder emails to incomplete students across ${assignedClassNames}.`}
+      description={`Dispatches official academic reminder emails to incomplete students across ${assignedClassNames}.`}
       icon={<Mail size={22} className="text-amber-600" />}
-      maxWidth="max-w-2xl"
+      maxWidth="2xl"
       footer={
         <div className="flex items-center justify-end gap-3 w-full">
           <Button variant="ghost" onClick={onClose} disabled={emailAlertSending}>

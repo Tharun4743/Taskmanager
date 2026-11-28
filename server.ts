@@ -1217,9 +1217,63 @@ async function startServer() {
     }
   };
 
+  const isCoordinatorUser = (u: any) => u?.role === 'STUDENT' && Boolean(u?.is_coordinator);
+  const isFacultyUser = (u: any) => u?.role === 'FACULTY' || u?.role === 'STAFF';
+  const isIndustryUser = (u: any) => u?.role === 'INDUSTRY' || u?.role === 'INDUSTRY_GUEST';
+
+  const getCompanyIdForUser = async (userId: string): Promise<string | null> => {
+    const cpRes = await pool.query('SELECT id FROM company_profiles WHERE user_id = $1 LIMIT 1', [userId]);
+    return cpRes.rowCount ? String(cpRes.rows[0].id) : null;
+  };
+
+  const canManageTask = async (user: any, task: any, taskClassIds: string[]): Promise<boolean> => {
+    if (!user || !task) return false;
+    if (user.role === 'SUPREME_ADMIN') return true;
+    if (user.role === 'HOD' || isFacultyUser(user)) {
+      if (task.department_id?.toString() === user.department_id?.toString()) return true;
+      if (taskClassIds.length > 0 && user.department_id) {
+        const deptClassRes = await pool.query(
+          'SELECT 1 FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2 LIMIT 1',
+          [taskClassIds, user.department_id]
+        );
+        return Boolean(deptClassRes.rowCount && deptClassRes.rowCount > 0);
+      }
+      return false;
+    }
+    if (user.role === 'CLASS_ADVISOR' || isCoordinatorUser(user)) {
+      if (task.created_by?.toString() === user.id?.toString()) return true;
+      if (user.class_id && taskClassIds.includes(user.class_id.toString())) return true;
+      return false;
+    }
+    return false;
+  };
+
+  const canViewTask = async (user: any, task: any, taskClassIds: string[]): Promise<boolean> => {
+    if (!user || !task) return false;
+    if (user.role === 'SUPREME_ADMIN') return true;
+    if (isIndustryUser(user)) return false;
+    if (await canManageTask(user, task, taskClassIds)) return true;
+    if (user.role === 'STUDENT') {
+      if (taskClassIds.length > 0) {
+        return Boolean(user.class_id && taskClassIds.includes(user.class_id.toString()));
+      }
+      if (!task.department_id) return true;
+      return task.department_id?.toString() === user.department_id?.toString();
+    }
+    return false;
+  };
+
   const authorize = (roles: string[]) => (req: any, res: any, next: any) => {
-    const isUserCoordinator = req.user?.role === 'STUDENT' && Boolean(req.user?.is_coordinator);
-    const hasRole = roles.includes(req.user?.role) || (roles.includes('COORDINATOR') && isUserCoordinator);
+    const userRole = req.user?.role;
+    const isUserCoordinator = isCoordinatorUser(req.user);
+    const isUserFacultyOrStaff = isFacultyUser(req.user);
+    const isUserIndustry = isIndustryUser(req.user);
+
+    const hasRole = roles.includes(userRole)
+      || (roles.includes('COORDINATOR') && isUserCoordinator)
+      || ((roles.includes('FACULTY') || roles.includes('STAFF')) && isUserFacultyOrStaff)
+      || ((roles.includes('INDUSTRY') || roles.includes('INDUSTRY_GUEST')) && isUserIndustry);
+
     if (!hasRole) {
       return res.status(403).json({ error: 'Forbidden' });
     }
@@ -2654,7 +2708,8 @@ async function startServer() {
 
   // ── Users ─────────────────────────────────────────────────────────────────
   app.get('/api/users', authenticate, async (req: any, res) => {
-    const cacheKey = `users_${req.user.role}_${req.user.department_id || 'all'}_${req.user.class_id || 'all'}`;
+    const isRegStudent = req.user.role === 'STUDENT' && !req.user.is_coordinator;
+    const cacheKey = `users_${req.user.role}_${isRegStudent ? 'STD' : 'PRIV'}_${req.user.department_id || 'all'}_${req.user.class_id || 'all'}`;
     const cached = getApiCache(cacheKey);
     if (cached) return res.json(cached);
 
@@ -2684,7 +2739,7 @@ async function startServer() {
         WHERE u.class_id = $1 AND u.role = 'STUDENT'
         ORDER BY u.register_number ASC, u.full_name ASC
       `, [req.user.class_id]);
-    } else if (req.user.role === 'FACULTY' || req.user.role === 'STAFF') {
+    } else if (isFacultyUser(req.user)) {
       usersRes = await pool.query(`
         SELECT u.*, c.name as class_name, c.year as class_year
         FROM users u
@@ -2692,7 +2747,7 @@ async function startServer() {
         WHERE u.department_id = $1 AND u.role = 'STUDENT'
         ORDER BY c.year ASC NULLS LAST, c.name ASC NULLS LAST, u.register_number ASC NULLS LAST, u.full_name ASC
       `, [req.user.department_id]);
-    } else if (req.user.role === 'INDUSTRY') {
+    } else if (isIndustryUser(req.user)) {
       usersRes = await pool.query(`
         SELECT u.*, d.name as department_name, c.name as class_name, c.year as class_year
         FROM users u
@@ -2707,10 +2762,10 @@ async function startServer() {
 
     const data = usersRes.rows.map((u: any) => ({
       id: u.id,
-      username: u.username,
+      username: isRegStudent ? undefined : u.username,
       role: u.role,
       full_name: u.full_name,
-      email: u.email,
+      email: isRegStudent ? undefined : u.email,
       register_number: u.register_number,
       gender: u.gender,
       is_coordinator: u.is_coordinator,
@@ -2721,7 +2776,7 @@ async function startServer() {
       class_name: u.class_name,
       is_approved: u.is_approved !== false,
       status: u.status || 'ACTIVE',
-      rejection_reason: u.rejection_reason || null,
+      rejection_reason: isRegStudent ? undefined : (u.rejection_reason || null),
       created_at: u.created_at,
     }));
     setApiCache(cacheKey, data, 20);
@@ -3033,6 +3088,15 @@ async function startServer() {
   // Query Student Directory from Supabase
   app.post('/api/admin/generate-student-directory', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR']), async (req: any, res) => {
     try {
+      const dirParams: any[] = [];
+      let scopeSql = '';
+      if (req.user.role === 'HOD') {
+        dirParams.push(req.user.department_id);
+        scopeSql = ` AND u.department_id = $${dirParams.length}`;
+      } else if (req.user.role === 'CLASS_ADVISOR') {
+        dirParams.push(req.user.class_id);
+        scopeSql = ` AND u.class_id = $${dirParams.length}`;
+      }
       const result = await pool.query(`
         SELECT u.id, u.register_number, u.full_name, u.email, u.gender, c.name as class_name, d.name as department_name, c.year, c.batch,
                COALESCE(u.leetcode_url, '') AS leetcode,
@@ -3040,9 +3104,9 @@ async function startServer() {
         FROM users u
         LEFT JOIN classes c ON u.class_id = c.id
         LEFT JOIN departments d ON u.department_id = d.id
-        WHERE u.role = 'STUDENT'
+        WHERE u.role = 'STUDENT'${scopeSql}
         ORDER BY c.year ASC, c.name ASC, u.register_number ASC;
-      `);
+      `, dirParams);
       res.json({ message: 'Student directory queried from Supabase successfully', studentCount: result.rows.length, students: result.rows });
     } catch (err: any) {
       console.error('[StudentDirectory] Failed to query directory from Supabase:', err);
@@ -3249,7 +3313,7 @@ async function startServer() {
   });
 
   // Dedicated Poster Image Upload Endpoint
-  app.post('/api/upload/poster', authenticate, upload.single('poster'), (req: any, res) => {
+  app.post('/api/upload/poster', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'COORDINATOR']), upload.single('poster'), (req: any, res) => {
     if (!req.file) return res.status(400).json({ error: 'No poster image file provided' });
     res.json({
       poster_url: req.file.path,
@@ -3293,6 +3357,11 @@ async function startServer() {
     `, [taskId]);
     const t = taskRes.rows[0];
     if (!t) return res.status(404).json({ error: 'Task not found' });
+
+    const taskClassIds = Array.isArray(t.class_ids) ? t.class_ids.map((cid: any) => String(cid)) : [];
+    if (!(await canViewTask(req.user, t, taskClassIds))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     const countsRes = await pool.query(`
       SELECT count(*) as count FROM task_submissions WHERE task_id = $1 AND status IN ('SUBMITTED', 'VERIFIED')
@@ -3534,29 +3603,7 @@ async function startServer() {
     }
 
     // 2. Authorization Verification
-    let isAuthorized = false;
-    if (req.user.role === 'SUPREME_ADMIN') {
-      isAuthorized = true;
-    } else if (req.user.role === 'HOD' || req.user.role === 'FACULTY' || req.user.role === 'STAFF') {
-      if (task.department_id?.toString() === req.user.department_id?.toString()) {
-        isAuthorized = true;
-      } else if (taskClassIds.length > 0) {
-        const hodClassRes = await pool.query(
-          'SELECT 1 FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2 LIMIT 1',
-          [taskClassIds, req.user.department_id]
-        );
-        if (hodClassRes.rowCount && hodClassRes.rowCount > 0) {
-          isAuthorized = true;
-        }
-      }
-    } else if (req.user.role === 'CLASS_ADVISOR' || (req.user.role === 'STUDENT' && req.user.is_coordinator)) {
-      if (task.created_by?.toString() === req.user.id?.toString()) {
-        isAuthorized = true;
-      } else if (req.user.class_id && taskClassIds.includes(req.user.class_id.toString())) {
-        isAuthorized = true;
-      }
-    }
-
+    const isAuthorized = await canManageTask(req.user, task, taskClassIds);
     if (!isAuthorized) return res.status(403).json({ error: 'Forbidden: You do not have permission to change this task status' });
 
     const previousStatus = task.status;
@@ -3640,29 +3687,7 @@ async function startServer() {
     }
 
     // 2. Authorization Verification
-    let isAuthorized = false;
-    if (req.user.role === 'SUPREME_ADMIN') {
-      isAuthorized = true;
-    } else if (req.user.role === 'HOD' || req.user.role === 'FACULTY' || req.user.role === 'STAFF') {
-      if (task.department_id?.toString() === req.user.department_id?.toString()) {
-        isAuthorized = true;
-      } else if (taskClassIds.length > 0) {
-        const hodClassRes = await pool.query(
-          'SELECT 1 FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2 LIMIT 1',
-          [taskClassIds, req.user.department_id]
-        );
-        if (hodClassRes.rowCount && hodClassRes.rowCount > 0) {
-          isAuthorized = true;
-        }
-      }
-    } else if (req.user.role === 'CLASS_ADVISOR' || (req.user.role === 'STUDENT' && req.user.is_coordinator)) {
-      if (task.created_by?.toString() === req.user.id?.toString()) {
-        isAuthorized = true;
-      } else if (req.user.class_id && taskClassIds.includes(req.user.class_id.toString())) {
-        isAuthorized = true;
-      }
-    }
-
+    const isAuthorized = await canManageTask(req.user, task, taskClassIds);
     if (!isAuthorized) return res.status(403).json({ error: 'Forbidden: You do not have permission to reopen this task' });
 
     // Update database immediately
@@ -3755,7 +3780,7 @@ async function startServer() {
   });
 
   // ── Fetch Incomplete / Pending Students for a Task ───────────────────────────
-  app.get('/api/tasks/:id/pending-students', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR']), async (req: any, res) => {
+  app.get('/api/tasks/:id/pending-students', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'COORDINATOR']), async (req: any, res) => {
     try {
       const taskId = req.params.id;
       const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [taskId]);
@@ -3764,7 +3789,7 @@ async function startServer() {
 
       // Fetch assigned classes (or fallback to department / all classes if task_classes is empty)
       let classesRes = await pool.query(`
-        SELECT c.id, c.name FROM task_classes tc
+        SELECT c.id, c.name, c.department_id FROM task_classes tc
         JOIN classes c ON c.id = tc.class_id
         WHERE tc.task_id = $1
         ORDER BY c.name ASC
@@ -3773,16 +3798,27 @@ async function startServer() {
       if (classesRes.rows.length === 0) {
         if (task.department_id) {
           classesRes = await pool.query(`
-            SELECT c.id, c.name FROM classes c
+            SELECT c.id, c.name, c.department_id FROM classes c
             WHERE c.department_id = $1
             ORDER BY c.name ASC
           `, [task.department_id]);
         } else {
           classesRes = await pool.query(`
-            SELECT c.id, c.name FROM classes c
+            SELECT c.id, c.name, c.department_id FROM classes c
             ORDER BY c.name ASC
           `);
         }
+      }
+
+      const rawClassIds = classesRes.rows.map(r => String(r.id));
+      if (!(await canManageTask(req.user, task, rawClassIds))) {
+        return res.status(403).json({ error: 'Forbidden: You do not have permission to view pending students for this task' });
+      }
+
+      if (req.user.role === 'CLASS_ADVISOR' || isCoordinatorUser(req.user)) {
+        classesRes.rows = classesRes.rows.filter(r => String(r.id) === String(req.user.class_id));
+      } else if (req.user.role === 'HOD' || isFacultyUser(req.user)) {
+        classesRes.rows = classesRes.rows.filter(r => String(r.department_id) === String(req.user.department_id));
       }
 
       const targetClassIds = classesRes.rows.map(r => r.id);
@@ -3869,6 +3905,16 @@ async function startServer() {
     try {
       const taskId = req.params.id;
       const { customMessage } = req.body;
+
+      const taskRes = await pool.query('SELECT * FROM tasks WHERE id = $1 LIMIT 1', [taskId]);
+      const task = taskRes.rows[0];
+      if (!task) return res.status(404).json({ error: 'Task not found' });
+
+      const tcRes = await pool.query('SELECT class_id FROM task_classes WHERE task_id = $1', [taskId]);
+      const taskClassIds = tcRes.rows.map(r => String(r.class_id));
+      if (!(await canManageTask(req.user, task, taskClassIds))) {
+        return res.status(403).json({ error: 'Forbidden: You do not have permission to send reminders for this task' });
+      }
 
       const result = await triggerManualTaskPendingReminders(
         taskId,
@@ -4642,7 +4688,8 @@ async function startServer() {
   // 10. GET /api/team/submissions (Cached in-memory to prevent DB hammering)
   app.get('/api/team/submissions', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'STUDENT']), async (req: any, res) => {
     const { taskId, classId } = req.query;
-    const cacheKey = `team_subs_${req.user.role}_${req.user.id}_${taskId || 'all'}_${classId || 'all'}`;
+    const isRegStudent = req.user.role === 'STUDENT' && !req.user.is_coordinator;
+    const cacheKey = `team_subs_${req.user.role}_${isRegStudent ? 'STD' : 'PRIV'}_${req.user.id}_${taskId || 'all'}_${classId || 'all'}`;
     const cached = getApiCache(cacheKey);
     if (cached) return res.json(cached);
 
@@ -4661,7 +4708,10 @@ async function startServer() {
         query += ` AND t.task_id = $${params.length}`;
       }
 
-      if (req.user.role === 'STUDENT' || req.user.role === 'CLASS_ADVISOR') {
+      if (isRegStudent) {
+        params.push(req.user.id);
+        query += ` AND (t.leader_id = $${params.length} OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = t.id AND tm.student_id = $${params.length}))`;
+      } else if (req.user.role === 'STUDENT' || req.user.role === 'CLASS_ADVISOR') {
         params.push(req.user.class_id);
         query += ` AND (t.class_id = $${params.length} OR u.class_id = $${params.length})`;
       } else if (req.user.role === 'HOD') {
@@ -4736,6 +4786,16 @@ async function startServer() {
     const task = taskRes.rows[0];
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
+    if (req.user.role === 'STUDENT' && req.user.is_coordinator) {
+      const isLeader = String(team.leader_id) === String(req.user.id);
+      const memberRes = isLeader
+        ? { rowCount: 1 }
+        : await pool.query('SELECT 1 FROM team_members WHERE team_id = $1 AND student_id = $2 LIMIT 1', [team.id, req.user.id]);
+      if (isLeader || (memberRes.rowCount && memberRes.rowCount > 0)) {
+        return res.status(403).json({ error: 'Forbidden: Coordinators cannot review their own team submission. It must be reviewed by your Class Advisor or HOD.' });
+      }
+    }
+
     if (req.user.role === 'STUDENT' || req.user.role === 'CLASS_ADVISOR') {
       const userClassId = req.user.class_id?.toString();
       const teamClassId = team.class_id?.toString();
@@ -4745,6 +4805,12 @@ async function startServer() {
         if (leaderClassId !== userClassId) {
           return res.status(403).json({ error: 'Forbidden: You can only review team submissions for your class.' });
         }
+      }
+    } else if (req.user.role === 'HOD') {
+      const leaderRes = await pool.query('SELECT department_id FROM users WHERE id = $1 LIMIT 1', [team.leader_id]);
+      const leaderDeptId = leaderRes.rows[0]?.department_id?.toString();
+      if (leaderDeptId && leaderDeptId !== req.user.department_id?.toString()) {
+        return res.status(403).json({ error: 'Forbidden: You can only review team submissions within your department.' });
       }
     }
 
@@ -6272,7 +6338,7 @@ async function startServer() {
             } else {
               uRes = { rows: [] };
             }
-          } else if (dbUser.role === 'INDUSTRY') {
+          } else if (isIndustryUser(dbUser)) {
             uRes = await pool.query(`
               SELECT u.id, u.username, u.full_name, u.email, u.role, u.register_number, u.gender,
                      u.department_id, u.class_id, COALESCE(u.avatar_url, u.profile_picture) as avatar_url,
@@ -6409,7 +6475,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/team/report', authenticate, async (req: any, res) => {
+  app.get('/api/team/report', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF', 'COORDINATOR']), async (req: any, res) => {
     try {
       let query = `
         SELECT 
@@ -6438,7 +6504,7 @@ async function startServer() {
       if (req.user.role === 'STUDENT' || req.user.role === 'CLASS_ADVISOR') {
         params.push(req.user.class_id);
         query += ` AND (t.class_id = $${params.length} OR leader.class_id = $${params.length})`;
-      } else if (req.user.role === 'HOD') {
+      } else if (req.user.role === 'HOD' || isFacultyUser(req.user)) {
         params.push(req.user.department_id);
         query += ` AND leader.department_id = $${params.length}`;
       }
@@ -6805,11 +6871,12 @@ async function startServer() {
       const isSelf = currentUser.id?.toString() === targetUserId.toString();
       const isAdmin = currentUser.role === 'ADMIN' || currentUser.role === 'SUPREME_ADMIN';
       const isHOD = currentUser.role === 'HOD' && currentUser.department_id?.toString() === academic.department_id?.toString();
-      const isIndustry = currentUser.role === 'INDUSTRY';
+      const isFaculty = isFacultyUser(currentUser) && currentUser.department_id?.toString() === academic.department_id?.toString();
+      const isIndustry = isIndustryUser(currentUser);
       const isAdvisorOrCoordinator = (currentUser.role === 'ADVISOR' || currentUser.role === 'CLASS_ADVISOR' || currentUser.role === 'COORDINATOR' || currentUser.is_coordinator) &&
         currentUser.class_id?.toString() === academic.class_id?.toString();
 
-      if (!isSelf && !isAdmin && !isHOD && !isAdvisorOrCoordinator && !isIndustry) {
+      if (!isSelf && !isAdmin && !isHOD && !isFaculty && !isAdvisorOrCoordinator && !isIndustry) {
         return res.status(403).json({ error: 'You do not have permission to view this student profile' });
       }
 
@@ -7555,15 +7622,26 @@ async function startServer() {
       if (scope === 'ALL') scope = 'DEPARTMENT';
     }
 
-    const deptId = u.role === 'CLASS_ADVISOR' ? u.department_id : (department_id || u.department_id || null);
+    const deptId = (u.role === 'CLASS_ADVISOR' || u.role === 'HOD') ? u.department_id : (department_id || u.department_id || null);
 
-    // Validate advisor notice target classes
+    // Validate advisor & HOD notice target classes
     if (u.role === 'CLASS_ADVISOR') {
+      if (class_id && class_id.toString() !== u.class_id?.toString()) {
+        return res.status(403).json({ error: 'Forbidden: Cannot post notices to classes other than your assigned class.' });
+      }
       if (scope === 'CLASS' && Array.isArray(class_ids) && class_ids.length > 0) {
         for (const cid of class_ids) {
           if (cid.toString() !== u.class_id?.toString()) {
             return res.status(403).json({ error: 'Forbidden: Cannot post notices to classes other than your assigned class.' });
           }
+        }
+      }
+    } else if (u.role === 'HOD') {
+      const targetIds = Array.isArray(class_ids) && class_ids.length > 0 ? class_ids : (class_id ? [class_id] : []);
+      if (targetIds.length > 0) {
+        const clsRes = await pool.query('SELECT id FROM classes WHERE id = ANY($1::uuid[]) AND department_id = $2', [targetIds, u.department_id]);
+        if (clsRes.rowCount !== targetIds.length) {
+          return res.status(403).json({ error: 'Forbidden: Cannot post notices to classes outside your department.' });
         }
       }
     }
@@ -13115,7 +13193,7 @@ async function startServer() {
     if (cached) return res.json(cached);
 
     const result = await pool.query(
-      `SELECT cp.*, u.username, u.full_name, u.email, u.created_at as registered_at FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.is_verified = FALSE AND u.role = 'INDUSTRY' ORDER BY u.created_at DESC`
+      `SELECT cp.*, u.username, u.full_name, u.email, u.created_at as registered_at FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE cp.is_verified = FALSE AND u.role IN ('INDUSTRY', 'INDUSTRY_GUEST') ORDER BY u.created_at DESC`
     );
     setApiCache(cacheKey, result.rows, 30);
     res.json(result.rows);
@@ -13131,7 +13209,7 @@ async function startServer() {
     if (cached) return res.json(cached);
 
     const result = await pool.query(
-      `SELECT cp.*, u.username, u.full_name, u.email FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE u.role = 'INDUSTRY' ORDER BY cp.created_at DESC`
+      `SELECT cp.*, u.username, u.full_name, u.email FROM company_profiles cp JOIN users u ON u.id = cp.user_id WHERE u.role IN ('INDUSTRY', 'INDUSTRY_GUEST') ORDER BY cp.created_at DESC`
     );
     setApiCache(cacheKey, result.rows, 30);
     res.json(result.rows);
@@ -13265,8 +13343,15 @@ async function startServer() {
   // ── Industry: Ranked Candidates for a Posting ─────────────────────────────
   app.get('/api/industry/postings/:id/ranking', authenticate, authorize(['INDUSTRY', 'HOD', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id: postingId } = req.params;
-    const postingRes = await pool.query(`SELECT required_skills, min_cgpa, min_year FROM industry_postings WHERE id=$1`, [postingId]);
+    const reqUser = (req as any).user;
+    const postingRes = await pool.query(`SELECT company_id, required_skills, min_cgpa, min_year FROM industry_postings WHERE id=$1`, [postingId]);
     if (postingRes.rowCount === 0) return res.status(404).json({ error: 'Posting not found' });
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(postingRes.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Posting belongs to another company' });
+      }
+    }
     const requiredSkills: { skill: string; level: number; weight: number }[] = postingRes.rows[0].required_skills || [];
     const studentsRes = await pool.query(
       `SELECT u.id, u.full_name, u.email, u.register_number, sp.cgpa, sp.semester, u.class_id FROM users u LEFT JOIN student_profiles sp ON sp.user_id=u.id WHERE u.role='STUDENT' ORDER BY u.full_name ASC LIMIT 200`
@@ -13348,6 +13433,15 @@ async function startServer() {
   // ── Industry: Manage Applications ─────────────────────────────────────────
   app.get('/api/industry/postings/:id/applications', authenticate, authorize(['INDUSTRY', 'HOD', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id: postingId } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const pRes = await pool.query(`SELECT company_id FROM industry_postings WHERE id=$1`, [postingId]);
+      if (!pRes.rowCount) return res.status(404).json({ error: 'Posting not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(pRes.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Posting belongs to another company' });
+      }
+    }
     const result = await pool.query(
       `SELECT pa.*, u.full_name, u.email, u.register_number, sp.cgpa, sp.semester FROM posting_applications pa JOIN users u ON u.id=pa.student_id LEFT JOIN student_profiles sp ON sp.user_id=u.id WHERE pa.posting_id=$1 ORDER BY pa.match_score DESC`,
       [postingId]
@@ -13358,10 +13452,17 @@ async function startServer() {
   app.put('/api/industry/applications/:id/status', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const { status, decision_note } = req.body;
+    const reqUser = (req as any).user;
     const validStatuses = ['SHORTLISTED', 'INTERVIEW', 'SELECTED', 'REJECTED'];
     if (!validStatuses.includes(status)) return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
-    const appRes = await pool.query(`SELECT pa.student_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
+    const appRes = await pool.query(`SELECT pa.student_id, ip.company_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
     if (appRes.rowCount === 0) return res.status(404).json({ error: 'Application not found' });
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(appRes.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Application belongs to another company' });
+      }
+    }
     const { student_id, title, company_name } = appRes.rows[0];
     const updateFields: Record<string, any> = { status, decision_note: decision_note || null, updated_at: 'NOW()' };
     if (status === 'SHORTLISTED') updateFields.shortlisted_at = 'NOW()';
@@ -13398,9 +13499,16 @@ async function startServer() {
   app.put('/api/industry/applications/:id/interview', authenticate, authorize(['INDUSTRY']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const { interview_date, interview_notes } = req.body;
+    const reqUser = (req as any).user;
+    const appRes = await pool.query(`SELECT pa.student_id, ip.company_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
+    if (appRes.rowCount === 0) return res.status(404).json({ error: 'Application not found' });
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(appRes.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Application belongs to another company' });
+      }
+    }
     await pool.query(`UPDATE posting_applications SET status='INTERVIEW', interview_date=$1, interview_notes=$2, updated_at=NOW() WHERE id=$3`, [interview_date || null, interview_notes || null, id]);
-    
-    const appRes = await pool.query(`SELECT pa.student_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
     if (appRes.rows.length > 0) {
       const { student_id, title, company_name } = appRes.rows[0];
       sendUnifiedNotification({
@@ -13420,8 +13528,15 @@ async function startServer() {
   app.put('/api/industry/applications/:id/complete', authenticate, authorize(['INDUSTRY']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const { progress_notes, certificate_url } = req.body;
-    const appRes = await pool.query(`SELECT pa.student_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
+    const reqUser = (req as any).user;
+    const appRes = await pool.query(`SELECT pa.student_id, ip.company_id, ip.title, cp.company_name FROM posting_applications pa JOIN industry_postings ip ON ip.id=pa.posting_id JOIN company_profiles cp ON cp.id=ip.company_id WHERE pa.id=$1`, [id]);
     if (appRes.rowCount === 0) return res.status(404).json({ error: 'Application not found' });
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(appRes.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Application belongs to another company' });
+      }
+    }
     await pool.query(`UPDATE posting_applications SET status='COMPLETED', completion_date=NOW(), progress_notes=$1, certificate_url=$2, updated_at=NOW() WHERE id=$3`, [progress_notes || null, certificate_url || null, id]);
     const { student_id, title, company_name } = appRes.rows[0];
     sendUnifiedNotification({
@@ -13633,8 +13748,11 @@ async function startServer() {
 
   // ── Analytics: Placement Funnel & Skill Demand ────────────────────────────
   app.get('/api/admin/placement-funnel', authenticate, authorize(['HOD', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
+    const reqUser = (req as any).user;
     const { department_id } = req.query as Record<string, string>;
-    const userFilter = department_id ? `AND u.department_id='${department_id}'` : '';
+    const effectiveDeptId = reqUser.role === 'HOD' ? reqUser.department_id : (department_id || null);
+    const params = effectiveDeptId ? [effectiveDeptId] : [];
+    const userFilter = effectiveDeptId ? `AND u.department_id = $1` : '';
     const funnel = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE pa.status IN ('APPLIED','SHORTLISTED','INTERVIEW','SELECTED','COMPLETED')) as total_applications,
@@ -13647,7 +13765,7 @@ async function startServer() {
       FROM posting_applications pa
       JOIN users u ON u.id = pa.student_id
       WHERE 1=1 ${userFilter}
-    `);
+    `, params);
     const byType = await pool.query(`
       SELECT ip.posting_type, COUNT(pa.id) as count
       FROM posting_applications pa
@@ -13655,7 +13773,7 @@ async function startServer() {
       JOIN users u ON u.id = pa.student_id
       WHERE 1=1 ${userFilter}
       GROUP BY ip.posting_type ORDER BY count DESC
-    `);
+    `, params);
     res.json({ funnel: funnel.rows[0], by_type: byType.rows });
   }));
 
@@ -13677,11 +13795,11 @@ async function startServer() {
   }));
 
   // ── 📊 Institutional Skill Heatmap & Cohort Analytics ──────────────
-  app.get('/api/analytics/institutional-skills-heatmap', authenticate, asyncHandler(async (req: Request, res: Response) => {
+  app.get('/api/analytics/institutional-skills-heatmap', authenticate, authorize(['SUPREME_ADMIN', 'HOD', 'CLASS_ADVISOR', 'FACULTY', 'STAFF']), asyncHandler(async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { department_id, class_id } = req.query as Record<string, string>;
 
-    // 1. Resolve student cohort based on role & filters
+    // 1. Resolve student cohort strictly bounded by caller role
     let studentQuery = `
       SELECT u.id, u.full_name, u.register_number, u.email, u.department_id, u.class_id,
              c.name as class_name, c.year, c.batch, d.name as department_name
@@ -13692,31 +13810,27 @@ async function startServer() {
     `;
     const studentParams: any[] = [];
 
-    if (class_id && class_id !== 'ALL') {
-      studentParams.push(class_id);
+    if (user.role === 'CLASS_ADVISOR') {
+      studentParams.push(user.class_id || null);
       studentQuery += ` AND u.class_id = $${studentParams.length}`;
-    } else if (department_id && department_id !== 'ALL') {
-      studentParams.push(department_id);
+    } else if (user.role === 'HOD' || isFacultyUser(user)) {
+      studentParams.push(user.department_id || null);
       studentQuery += ` AND u.department_id = $${studentParams.length}`;
-    } else if (user.role === 'CLASS_ADVISOR' && user.class_id) {
-      studentParams.push(user.class_id);
-      studentQuery += ` AND u.class_id = $${studentParams.length}`;
-    } else if (user.role === 'HOD' && user.department_id) {
-      studentParams.push(user.department_id);
-      studentQuery += ` AND u.department_id = $${studentParams.length}`;
+      if (class_id && class_id !== 'ALL') {
+        studentParams.push(class_id);
+        studentQuery += ` AND u.class_id = $${studentParams.length}`;
+      }
+    } else {
+      if (class_id && class_id !== 'ALL') {
+        studentParams.push(class_id);
+        studentQuery += ` AND u.class_id = $${studentParams.length}`;
+      } else if (department_id && department_id !== 'ALL') {
+        studentParams.push(department_id);
+        studentQuery += ` AND u.department_id = $${studentParams.length}`;
+      }
     }
 
-    let studentsRes = await pool.query(studentQuery, studentParams);
-    if (studentsRes.rowCount === 0) {
-      studentsRes = await pool.query(`
-        SELECT u.id, u.full_name, u.register_number, u.email, u.department_id, u.class_id,
-               c.name as class_name, c.year, c.batch, d.name as department_name
-        FROM users u
-        LEFT JOIN classes c ON c.id = u.class_id
-        LEFT JOIN departments d ON d.id = u.department_id
-        WHERE u.role = 'STUDENT'
-      `);
-    }
+    const studentsRes = await pool.query(studentQuery, studentParams);
 
     const totalStudents = studentsRes.rowCount || 0;
     const studentIds = studentsRes.rows.map(r => r.id);
@@ -13886,39 +14000,6 @@ async function startServer() {
         }
       }
 
-      // 4. Default Foundational Competencies for Department Curriculum
-      const baselineCurriculumSkills = [
-        { name: 'Full Stack Web Development', category: '💼 Enterprise Software', baseProf: 74 },
-        { name: 'Python & AI Engineering', category: '🤖 AI & Data Science', baseProf: 72 },
-        { name: 'Database Management Systems (SQL)', category: '⚡ Core CS & Databases', baseProf: 78 },
-        { name: 'Cloud Computing & DevOps', category: '☁️ Cloud & DevOps', baseProf: 68 },
-        { name: 'Digital Health-Tech & Healthcare Systems', category: '🌿 AYUSH & Digital Health-Tech', baseProf: 65 }
-      ];
-
-      for (const b of baselineCurriculumSkills) {
-        const k = b.name.toLowerCase();
-        if (!skillAgg[k]) {
-          skillAgg[k] = {
-            skill_name: b.name,
-            category: b.category,
-            student_ids: new Set(),
-            total_proficiency: 0,
-            verified_count: 0,
-            level_counts: { beginner: 0, intermediate: 0, advanced: 0, expert: 0 }
-          };
-          // Map a realistic proportion of active cohort
-          const sampleSize = Math.max(1, Math.round(studentIds.length * 0.6));
-          for (let i = 0; i < sampleSize; i++) {
-            const sid = studentIds[i];
-            skillAgg[k].student_ids.add(sid);
-            skillAgg[k].total_proficiency += b.baseProf;
-            skillAgg[k].verified_count++;
-            if (b.baseProf >= 80) skillAgg[k].level_counts.advanced++;
-            else if (b.baseProf >= 60) skillAgg[k].level_counts.intermediate++;
-            else skillAgg[k].level_counts.beginner++;
-          }
-        }
-      }
     }
 
     // Build Heatmap Array strictly from actual database skills
@@ -14094,11 +14175,17 @@ async function startServer() {
     const className = req.user.class_name || '';
 
     try {
+      const existingRoomRes = await pool.query('SELECT host_id, status FROM peer_teaching_rooms WHERE room_code = $1 LIMIT 1', [room_code]);
+      const existingRoom = existingRoomRes.rows[0];
+      if (existingRoom && existingRoom.status === 'LIVE' && String(existingRoom.host_id) !== String(req.user.id)) {
+        return res.status(403).json({ error: 'Forbidden: This live room code is currently hosted by another user' });
+      }
       const insRes = await pool.query(`
         INSERT INTO peer_teaching_rooms (room_code, topic, host_id, host_name, class_name, peer_count, status, updated_at)
         VALUES ($1, $2, $3, $4, $5, 1, 'LIVE', NOW())
         ON CONFLICT (room_code) DO UPDATE SET
           topic = EXCLUDED.topic,
+          host_id = EXCLUDED.host_id,
           host_name = EXCLUDED.host_name,
           class_name = EXCLUDED.class_name,
           status = 'LIVE',
@@ -14165,8 +14252,10 @@ async function startServer() {
       FROM coding_assessments ca
       JOIN company_profiles cp ON cp.id = ca.company_id
     `;
+    const reqUser = (req as any).user;
     const params: any[] = [];
-    if (companyId && (req as any).user.role === 'INDUSTRY') {
+    if (isIndustryUser(reqUser)) {
+      if (!companyId) return res.json([]);
       params.push(companyId);
       query += ` WHERE ca.company_id = $1`;
     }
@@ -14272,6 +14361,7 @@ async function startServer() {
   // ── HR: Get Single Coding Assessment with Full 10 Questions ───────────────
   app.get('/api/industry/coding-assessments/:id', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN', 'HOD']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const reqUser = (req as any).user;
     const caRes = await pool.query(`
       SELECT ca.*, cp.company_name, cp.industry_sector 
       FROM coding_assessments ca 
@@ -14280,6 +14370,12 @@ async function startServer() {
     `, [id]);
     if (!caRes.rowCount) return res.status(404).json({ error: 'Assessment not found' });
     const assessment = caRes.rows[0];
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(assessment.company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
 
     const questionsRes = await pool.query(`
       SELECT 
@@ -14308,6 +14404,15 @@ async function startServer() {
   // ── HR: Question Management (CRUD for 10-Question Pool) ───────────────────
   app.get('/api/industry/coding-assessments/:id/questions', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN', 'HOD']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const caCheck = await pool.query('SELECT company_id FROM coding_assessments WHERE id=$1', [id]);
+      if (!caCheck.rowCount) return res.status(404).json({ error: 'Assessment not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(caCheck.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
     const questionsRes = await pool.query(`
       SELECT 
         cq.*,
@@ -14332,6 +14437,15 @@ async function startServer() {
 
   app.post('/api/industry/coding-assessments/:id/questions', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id: assessmentId } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const caCheck = await pool.query('SELECT company_id FROM coding_assessments WHERE id=$1', [assessmentId]);
+      if (!caCheck.rowCount) return res.status(404).json({ error: 'Assessment not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(caCheck.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
     const { title, problem_statement, input_format, output_format, constraints, difficulty = 'MEDIUM', marks = 50, skills = ['Problem Solving'], test_cases = [] } = req.body;
 
     if (!title || !problem_statement || !constraints) {
@@ -14375,6 +14489,15 @@ async function startServer() {
 
   app.put('/api/industry/coding-assessments/:id/questions/:questionId', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id: assessmentId, questionId } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const caCheck = await pool.query('SELECT company_id FROM coding_assessments WHERE id=$1', [assessmentId]);
+      if (!caCheck.rowCount) return res.status(404).json({ error: 'Assessment not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(caCheck.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
     const { title, problem_statement, input_format, output_format, constraints, difficulty, marks, skills, test_cases } = req.body;
 
     const client = await pool.connect();
@@ -14422,6 +14545,15 @@ async function startServer() {
 
   app.delete('/api/industry/coding-assessments/:id/questions/:questionId', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN']), asyncHandler(async (req: Request, res: Response) => {
     const { id: assessmentId, questionId } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const caCheck = await pool.query('SELECT company_id FROM coding_assessments WHERE id=$1', [assessmentId]);
+      if (!caCheck.rowCount) return res.status(404).json({ error: 'Assessment not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(caCheck.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
     await pool.query(`DELETE FROM coding_questions WHERE id = $1 AND assessment_id = $2`, [questionId, assessmentId]);
     res.json({ message: 'Question deleted successfully' });
   }));
@@ -14431,9 +14563,16 @@ async function startServer() {
     const { id } = req.params;
 
     // 1. Fetch assessment
+    const reqUser = (req as any).user;
     const caRes = await pool.query(`SELECT * FROM coding_assessments WHERE id = $1`, [id]);
     if (!caRes.rowCount) return res.status(404).json({ error: 'Assessment not found' });
     const assessment = caRes.rows[0];
+    if (isIndustryUser(reqUser)) {
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(assessment.company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
 
     // 2. Fetch all questions in pool
     const qRes = await pool.query(`
@@ -14502,6 +14641,15 @@ async function startServer() {
   // ── HR: Candidate Results & Proctoring Audit ───────────────────────────────
   app.get('/api/industry/coding-assessments/:id/results', authenticate, authorize(['INDUSTRY', 'SUPREME_ADMIN', 'HOD']), asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const reqUser = (req as any).user;
+    if (isIndustryUser(reqUser)) {
+      const caCheck = await pool.query('SELECT company_id FROM coding_assessments WHERE id=$1', [id]);
+      if (!caCheck.rowCount) return res.status(404).json({ error: 'Assessment not found' });
+      const myCompanyId = await getCompanyIdForUser(reqUser.id);
+      if (!myCompanyId || String(caCheck.rows[0].company_id) !== myCompanyId) {
+        return res.status(403).json({ error: 'Forbidden: Assessment belongs to another company' });
+      }
+    }
     const resultsRes = await pool.query(`
       SELECT 
         cas.id as assignment_id,

@@ -75,7 +75,7 @@ export function SubmissionInspectorModal({
         }}
       >
         <div
-          className="bg-white rounded-3xl w-full max-w-6xl h-[92vh] max-h-[920px] flex flex-col shadow-2xl overflow-hidden border border-zinc-200 cursor-default"
+          className="bg-white rounded-2xl sm:rounded-3xl w-full max-w-6xl h-[92dvh] max-h-[920px] flex flex-col shadow-2xl overflow-hidden border border-zinc-200 cursor-default"
           onClick={e => e.stopPropagation()}
         >
           {/* Modal Top Bar */}
@@ -163,7 +163,7 @@ export function SubmissionInspectorModal({
           </div>
 
           {/* Modal Main Content Area (2-column layout) */}
-          <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
+          <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 overflow-y-auto lg:overflow-hidden">
             {/* Left / Center: Proof Viewer (7 cols on desktop) */}
             <div className="lg:col-span-7 bg-zinc-950/95 flex flex-col relative overflow-hidden border-b lg:border-b-0 lg:border-r border-zinc-800">
               {/* Amber Duplicate Warning Bar */}
@@ -625,7 +625,7 @@ export function SubmissionInspectorModal({
                     placeholder="Enter official verification remarks or corrective feedback for this submission..."
                     value={verificationNote}
                     onChange={e => setVerificationNote(e.target.value)}
-                    className="text-xs h-9 bg-white"
+                    className="text-base md:text-xs h-10 md:h-9 bg-white"
                   />
                 </div>
 

@@ -14,6 +14,7 @@ import { Select } from '../../components/ui/Select';
 import { Textarea } from '../../components/ui/Textarea';
 import { PageLayout } from '../../components/layout/PageLayout';
 import { CategoryDropdown } from '../../components/common/CategoryDropdown';
+import { DraftProofPreview } from '../../components/common/DraftProofPreview';
 import { FormattedTaskDescription } from '../../components/common/FormattedTaskDescription';
 import { TaskDescriptionEditor } from '../../components/common/TaskDescriptionEditor';
 import {
@@ -1631,111 +1632,14 @@ export function TasksView({
                                                   <div className="flex flex-col gap-4">
                                                     <div className="w-full">
                                                       {selectedFiles[task.id] ? (
-                                                        <div className="w-full border-2 border-emerald-400 bg-emerald-50/70 rounded-2xl p-4 md:p-5 flex flex-col gap-3.5 shadow-sm transition-all">
-                                                          {/* Staged Proof Top Metadata Bar */}
-                                                          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-emerald-200/80 pb-3">
-                                                            <div className="flex items-center gap-2.5 min-w-0">
-                                                              <div className="w-8 h-8 rounded-full bg-emerald-500 text-white flex items-center justify-center shrink-0 shadow-xs">
-                                                                <CheckCircle2 size={18} />
-                                                              </div>
-                                                              <div className="min-w-0">
-                                                                <div className="flex items-center gap-1.5">
-                                                                  <span className="text-xs font-black uppercase tracking-wider text-emerald-800">Proof Screenshot Loaded</span>
-                                                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-extrabold border border-emerald-300">Draft</span>
-                                                                </div>
-                                                                <p className="text-xs text-zinc-800 font-bold truncate max-w-xs md:max-w-md mt-0.5" title={selectedFiles[task.id].name}>
-                                                                  {selectedFiles[task.id].name}
-                                                                </p>
-                                                              </div>
-                                                            </div>
-
-                                                            {/* Preview Controls */}
-                                                            <div className="flex items-center gap-2 shrink-0">
-                                                              <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                  e.stopPropagation();
-                                                                  setProofPreviewData({
-                                                                    url: URL.createObjectURL(selectedFiles[task.id]),
-                                                                    title: task.title,
-                                                                    filename: selectedFiles[task.id].name,
-                                                                    size: `${(selectedFiles[task.id].size / (1024 * 1024)).toFixed(2)} MB`,
-                                                                    isDraft: true,
-                                                                    onChangeFile: () => document.getElementById(`file-${task.id}`)?.click(),
-                                                                    onDeleteFile: () => handleDeleteScreenshot(task.id)
-                                                                  });
-                                                                }}
-                                                                className="text-xs font-bold text-indigo-700 hover:text-indigo-950 bg-white hover:bg-indigo-50 px-3 py-1.5 rounded-xl border border-indigo-200 transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
-                                                                title="Open 350% pan & zoom high-resolution preview modal"
-                                                              >
-                                                                <Maximize2 size={13} /> Fullscreen Zoom
-                                                              </button>
-                                                              <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                  e.stopPropagation();
-                                                                  document.getElementById(`file-${task.id}`)?.click();
-                                                                }}
-                                                                className="text-xs font-semibold text-zinc-700 hover:text-zinc-900 bg-white hover:bg-zinc-100 px-3 py-1.5 rounded-xl border border-zinc-200 transition-colors flex items-center gap-1 shadow-xs"
-                                                                title="Select a different screenshot"
-                                                              >
-                                                                <Upload size={13} /> Change
-                                                              </button>
-                                                              <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                  e.stopPropagation();
-                                                                  handleDeleteScreenshot(task.id);
-                                                                }}
-                                                                className="text-xs font-bold text-red-600 hover:text-red-800 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl border border-red-200 transition-colors flex items-center gap-1.5 shadow-xs"
-                                                                title="Remove screenshot if wrong"
-                                                              >
-                                                                <Trash2 size={13} /> Remove
-                                                              </button>
-                                                            </div>
-                                                          </div>
-
-                                                          {/* High-Clarity In-Card Live Preview Viewport */}
-                                                          <div
-                                                            onClick={(e) => {
-                                                              e.stopPropagation();
-                                                              setProofPreviewData({
-                                                                url: URL.createObjectURL(selectedFiles[task.id]),
-                                                                title: task.title,
-                                                                filename: selectedFiles[task.id].name,
-                                                                size: `${(selectedFiles[task.id].size / (1024 * 1024)).toFixed(2)} MB`,
-                                                                isDraft: true,
-                                                                onChangeFile: () => document.getElementById(`file-${task.id}`)?.click(),
-                                                                onDeleteFile: () => handleDeleteScreenshot(task.id)
-                                                              });
-                                                            }}
-                                                            className="relative w-full max-h-72 md:max-h-80 rounded-xl overflow-hidden border-2 border-emerald-300 bg-zinc-900/5 flex items-center justify-center cursor-pointer group/preview shadow-inner p-2"
-                                                            title="Click to inspect proof in 350% zoom & rotate modal"
-                                                          >
-                                                            <img
-                                                              src={URL.createObjectURL(selectedFiles[task.id])}
-                                                              alt="Staged proof preview"
-                                                              className="max-h-64 md:max-h-72 w-auto max-w-full rounded-lg object-contain transition-transform duration-200 group-hover/preview:scale-[1.01]"
-                                                            />
-                                                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/preview:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-bold gap-2 backdrop-blur-[1px]">
-                                                              <Eye size={18} /> Click to Inspect with 350% Zoom & Pan
-                                                            </div>
-                                                            <div className="absolute bottom-3 right-3 bg-zinc-900/75 text-white text-[10px] font-semibold px-2.5 py-1 rounded-md backdrop-blur-xs flex items-center gap-1 shadow-sm">
-                                                              <span>{(selectedFiles[task.id].size / (1024 * 1024)).toFixed(2)} MB</span>
-                                                            </div>
-                                                          </div>
-
-                                                          {/* Academic Verification Checklist Alert */}
-                                                          <div className="bg-white/90 border border-emerald-300/80 rounded-xl p-3 flex items-start gap-2.5 text-xs text-emerald-900">
-                                                            <FileCheck size={16} className="text-emerald-600 shrink-0 mt-0.5" />
-                                                            <div>
-                                                              <p className="font-bold text-emerald-950">Pre-Submission Verification</p>
-                                                              <p className="text-[11px] text-zinc-600 leading-relaxed mt-0.5">
-                                                                Please confirm that your <strong className="text-zinc-900">Full Name</strong>, <strong className="text-zinc-900">Register Number</strong>, and <strong className="text-zinc-900">Completion Status</strong> are clearly visible in the preview above before clicking Submit.
-                                                              </p>
-                                                            </div>
-                                                          </div>
-                                                        </div>
+                                                        <DraftProofPreview
+                                                          taskId={String(task.id)}
+                                                          taskTitle={task.title}
+                                                          file={selectedFiles[task.id]}
+                                                          onChangeFile={() => document.getElementById(`file-${task.id}`)?.click()}
+                                                          onDeleteFile={() => handleDeleteScreenshot(task.id)}
+                                                          onOpenPreview={setProofPreviewData}
+                                                        />
                                                       ) : (
                                                         <div
                                                           className={cn(

@@ -183,6 +183,7 @@ export function useAppData() {
     scope: 'ALL' as any,
     target_dept_id: '',
     target_class_id: '',
+    class_ids: [] as string[],
     expires_at: ''
   });
   const [isCreatingNotice, setIsCreatingNotice] = useState(false);
@@ -277,6 +278,20 @@ export function useAppData() {
     } catch {}
   }, [token]);
 
+  const fetchTeamSubmissions = useCallback(async (overrideToken?: string) => {
+    const activeTok = overrideToken || token || localStorage.getItem('token');
+    if (!activeTok) return;
+    try {
+      const res = await fetch(`${API_URL}/api/team/submissions`, {
+        headers: { Authorization: `Bearer ${activeTok}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTeamSubmissions(Array.isArray(data) ? data : []);
+      }
+    } catch {}
+  }, [token]);
+
   const fetchSubmissions = useCallback(async () => {
     if (!token) return;
     try {
@@ -288,8 +303,9 @@ export function useAppData() {
         setSubmissions(data);
         try { sessionStorage.setItem('app_cache_submissions', JSON.stringify(data)); } catch {}
       }
+      fetchTeamSubmissions();
     } catch {}
-  }, [token]);
+  }, [token, fetchTeamSubmissions]);
 
   const fetchUsers = useCallback(async () => {
     if (!token) return;
@@ -490,18 +506,22 @@ export function useAppData() {
           if (role === 'SUPREME_ADMIN') {
             fetchSupremeStats(activeToken);
             fetchIndustryData(activeToken);
+            fetchTeamSubmissions(activeToken);
           } else if (role === 'HOD') {
             fetchHODStats(activeToken);
             fetchIndustryData(activeToken);
+            fetchTeamSubmissions(activeToken);
           } else if (role === 'CLASS_ADVISOR' || role === 'FACULTY' || role === 'STAFF') {
             fetchAdvisorStats(activeToken);
             fetchMyClass(activeToken);
+            fetchTeamSubmissions(activeToken);
           } else if (role === 'STUDENT') {
             fetchStudentStats(activeToken);
             fetchMyLeetcodeProgress(activeToken);
             fetchMyTeamsAndInvitations();
             if (bData.user.is_coordinator) {
               fetchCoordinatorStats(activeToken);
+              fetchTeamSubmissions(activeToken);
             }
           }
         }
@@ -530,12 +550,21 @@ export function useAppData() {
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
+      [
+        'app_cache_tasks',
+        'app_cache_submissions',
+        'app_cache_users',
+        'app_cache_notifs',
+        'app_cache_depts',
+        'app_cache_classes'
+      ].forEach(k => sessionStorage.removeItem(k));
     } catch {}
     setToken(null);
     setUser(null);
     setView('dashboard');
     setTasks([]);
     setSubmissions([]);
+    setTeamSubmissions([]);
     setDepartments([]);
     setClasses([]);
     setUsers([]);
@@ -543,6 +572,15 @@ export function useAppData() {
     setNotifications([]);
     setMyTeams([]);
     setMyInvitations([]);
+    setHodStats(null);
+    setAdvisorStats(null);
+    setStudentStats(null);
+    setCoordinatorStats(null);
+    setSupremeStats(null);
+    setMyClass(null);
+    setPendingIndustryList([]);
+    setAllIndustryList([]);
+    setMyLeetcodeProgress(null);
   }, []);
 
   // Notifications actions
@@ -592,16 +630,17 @@ export function useAppData() {
   const toggleTaskStatus = useCallback(async (id: number | string, currentStatus: string) => {
     const newStatus = currentStatus === 'OPEN' ? 'CLOSED' : 'OPEN';
     setTasks(prev => prev.map(t => String(t.id) === String(id) ? { ...t, status: newStatus as any } : t));
-    addToast(`Task status updated to ${newStatus}`, 'info');
     try {
       const res = await fetch(`${API_URL}/api/tasks/${id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status: newStatus })
       });
-      if (!res.ok) {
+      if (res.ok) {
+        addToast(`Task status updated to ${newStatus}`, 'info');
+      } else {
         setTasks(prev => prev.map(t => String(t.id) === String(id) ? { ...t, status: currentStatus as any } : t));
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         addToast(data.error || 'Failed to update task status', 'error');
       }
     } catch {
@@ -613,9 +652,6 @@ export function useAppData() {
   const handleExtendDeadlineAndReopen = useCallback(async (taskId: string | number, deadlineIso: string) => {
     const previousTasks = [...tasks];
     setTasks(prev => prev.map(t => String(t.id) === String(taskId) ? { ...t, status: 'OPEN', deadline: deadlineIso } : t));
-    setExtendingTask(null);
-    setExtendedDeadline('');
-    addToast('Task reopened and deadline extended successfully!', 'success');
     try {
       const res = await fetch(`${API_URL}/api/tasks/${taskId}/reopen`, {
         method: 'PATCH',
@@ -623,10 +659,13 @@ export function useAppData() {
         body: JSON.stringify({ deadline: deadlineIso })
       });
       if (res.ok) {
+        setExtendingTask(null);
+        setExtendedDeadline('');
+        addToast('Task reopened and deadline extended successfully!', 'success');
         fetchTasks();
       } else {
         setTasks(previousTasks);
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         addToast(data.error || 'Failed to extend deadline and reopen task', 'error');
       }
     } catch {
@@ -929,36 +968,63 @@ export function useAppData() {
   // Notice handlers
   const handleCreateNotice = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!noticeForm.title.trim() || !noticeForm.content.trim()) return;
+    if (!noticeForm.title.trim() || !noticeForm.content.trim()) {
+      addToast('Title and notice description are required', 'warning');
+      return;
+    }
     setIsCreatingNotice(true);
     try {
-      const formData = new FormData();
-      formData.append('title', noticeForm.title.trim());
-      formData.append('content', noticeForm.content.trim());
-      formData.append('category', noticeForm.category);
-      formData.append('priority', noticeForm.priority);
-      formData.append('scope', noticeForm.scope);
-      if (noticeForm.target_dept_id) formData.append('target_dept_id', noticeForm.target_dept_id);
-      if (noticeForm.target_class_id) formData.append('target_class_id', noticeForm.target_class_id);
-      if (noticeForm.expires_at) formData.append('expires_at', noticeForm.expires_at);
-      if (noticeAttachment) formData.append('attachment', noticeAttachment);
+      let attachment_url: string | undefined;
+      let attachment_cloudinary_public_id: string | undefined;
+
+      if (noticeAttachment) {
+        const uploadData = new FormData();
+        uploadData.append('attachment', noticeAttachment);
+        const upRes = await fetch(`${API_URL}/api/notices/upload`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: uploadData
+        });
+        if (!upRes.ok) {
+          const upErr = await upRes.json().catch(() => ({}));
+          addToast(upErr.error || 'Failed to upload notice attachment', 'error');
+          return;
+        }
+        const upJson = await upRes.json();
+        attachment_url = upJson.attachment_url;
+        attachment_cloudinary_public_id = upJson.attachment_cloudinary_public_id;
+      }
+
+      const payload = {
+        title: noticeForm.title.trim(),
+        description: noticeForm.content.trim(),
+        category: noticeForm.category,
+        priority: noticeForm.priority,
+        scope: noticeForm.scope,
+        department_id: noticeForm.target_dept_id || undefined,
+        class_id: noticeForm.target_class_id || undefined,
+        class_ids: Array.isArray(noticeForm.class_ids) && noticeForm.class_ids.length > 0 ? noticeForm.class_ids : undefined,
+        attachment_url,
+        attachment_cloudinary_public_id,
+        expire_at: noticeForm.expires_at || undefined,
+      };
 
       const res = await fetch(`${API_URL}/api/notices`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload)
       });
       if (res.ok) {
         addToast('Notice published successfully!', 'success');
         setShowCreateNoticeModal(false);
         setNoticeForm({
           title: '', content: '', category: 'GENERAL', priority: 'NORMAL',
-          scope: 'ALL', target_dept_id: '', target_class_id: '', expires_at: ''
+          scope: 'ALL', target_dept_id: '', target_class_id: '', class_ids: [], expires_at: ''
         });
         setNoticeAttachment(null);
         fetchNotices();
       } else {
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         addToast(data.error || 'Failed to publish notice', 'error');
       }
     } catch {
@@ -978,8 +1044,13 @@ export function useAppData() {
       if (res.ok) {
         setNotices(prev => prev.filter(n => String(n.id) !== String(id)));
         addToast('Notice deleted', 'info');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || 'Failed to delete notice', 'error');
       }
-    } catch {}
+    } catch {
+      addToast('Network error deleting notice', 'error');
+    }
   }, [token, addToast]);
 
   const handlePinNotice = useCallback(async (id: string) => {
@@ -992,8 +1063,13 @@ export function useAppData() {
         const updated = await res.json();
         setNotices(prev => prev.map(n => String(n.id) === String(id) ? { ...n, is_pinned: updated.is_pinned } : n));
         addToast(updated.is_pinned ? 'Notice pinned to top' : 'Notice unpinned', 'info');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        addToast(data.error || 'Failed to update pin status', 'error');
       }
-    } catch {}
+    } catch {
+      addToast('Network error updating notice pin', 'error');
+    }
   }, [token, addToast]);
 
   const handleShareNotice = useCallback((id: string, title?: string) => {
@@ -1152,8 +1228,8 @@ export function useAppData() {
   const isAdvisor = user?.role === 'CLASS_ADVISOR';
   const isStudent = user?.role === 'STUDENT';
   const isCoordinator = Boolean(user?.role === 'STUDENT' && user?.is_coordinator);
-  const isFaculty = user?.role === 'FACULTY';
-  const isIndustry = user?.role === 'INDUSTRY';
+  const isFaculty = user?.role === 'FACULTY' || user?.role === 'STAFF';
+  const isIndustry = user?.role === 'INDUSTRY' || user?.role === 'INDUSTRY_GUEST';
 
   const pendingVerificationCount = useMemo(() => {
     return submissions.filter(s => s.status === 'SUBMITTED').length;
@@ -1180,7 +1256,7 @@ export function useAppData() {
     notifications, setNotifications, showNotifications, setShowNotifications,
     notificationDropdownRef, markNotificationsRead, markSingleNotificationRead,
     myTeams, setMyTeams, myInvitations, setMyInvitations,
-    teamSubmissions, setTeamSubmissions, fetchMyTeamsAndInvitations,
+    teamSubmissions, setTeamSubmissions, fetchTeamSubmissions, fetchMyTeamsAndInvitations,
     notices, setNotices, fetchNotices,
     showExportModal, setShowExportModal,
     showCreateNoticeModal, setShowCreateNoticeModal,

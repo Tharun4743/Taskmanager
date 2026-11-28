@@ -4,7 +4,7 @@ import {
   Search, Filter, CheckCircle2, XCircle, Clock, Eye, Download,
   Camera, FileText, Loader2, Check, X, AlertTriangle, Users,
   CheckCheck, ArrowRight, ExternalLink, ImageIcon, ShieldCheck,
-  ChevronLeft, ChevronRight, CheckSquare, Copy, Trash2
+  ChevronLeft, ChevronRight, CheckSquare, Copy, Trash2, History
 } from 'lucide-react';
 import { PageLayout } from '../../components/layout/PageLayout';
 import { Card } from '../../components/ui/Card';
@@ -1315,10 +1315,11 @@ export function VerificationsView({
                                               headers: { Authorization: `Bearer ${token}` }
                                             });
                                             if (res.ok) {
+                                              addToast('Submission deleted', 'info');
                                               fetchInitialData();
                                             } else {
                                               const data = await res.json();
-                                              alert(data.error || 'Failed to delete submission');
+                                              addToast(data.error || 'Failed to delete submission', 'error');
                                             }
                                           }
                                         }}

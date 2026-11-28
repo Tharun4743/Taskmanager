@@ -15,7 +15,7 @@ export interface YearStats {
 export interface User {
   id: string | number;
   username: string;
-  role: 'SUPREME_ADMIN' | 'HOD' | 'CLASS_ADVISOR' | 'STUDENT' | 'INDUSTRY' | 'FACULTY' | 'STAFF';
+  role: 'SUPREME_ADMIN' | 'HOD' | 'CLASS_ADVISOR' | 'STUDENT' | 'INDUSTRY' | 'INDUSTRY_GUEST' | 'FACULTY' | 'STAFF';
   full_name: string;
   name?: string;
   department_id: string | number | null;

@@ -94,9 +94,9 @@ export function StudentHistoryModal({
       isOpen={isOpen && Boolean(selectedStudentHistory)}
       onClose={onClose}
       title={isGithub ? 'GitHub Commit History' : 'LeetCode Progress History'}
-      subtitle={`${student.fullName || student.full_name || ''} (${student.registerNumber || student.register_number || ''}) • ${student.className || 'IT'}`}
+      description={`${student.fullName || student.full_name || ''} (${student.registerNumber || student.register_number || ''}) • ${student.className || 'IT'}`}
       icon={isGithub ? <Github size={20} className="text-indigo-600" /> : <Code size={20} className="text-orange-500" />}
-      maxWidth="max-w-2xl"
+      maxWidth="2xl"
     >
       <div className="space-y-6 custom-scrollbar">
         {/* Student Profile Info */}
@@ -175,8 +175,8 @@ export function StudentHistoryModal({
               No records logged yet.
             </div>
           ) : (
-            <div className="border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden">
-              <table className="w-full text-left text-xs">
+            <div className="border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-x-auto custom-scrollbar">
+              <table className="w-full text-left text-xs min-w-[360px]">
                 <thead className="bg-zinc-50 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-200 dark:border-zinc-700">
                   <tr>
                     <th className="px-4 py-3">Date</th>

@@ -55,9 +55,9 @@ export function CreateNoticeModal({
       isOpen={isOpen}
       onClose={onClose}
       title="Publish New Notice"
-      subtitle="Broadcast announcements, schedules, and alerts to students"
+      description="Broadcast announcements, schedules, and alerts to students"
       icon={<Megaphone className="text-indigo-600" size={20} />}
-      maxWidth="max-w-lg"
+      maxWidth="lg"
     >
       <form onSubmit={onSubmit} className="space-y-4">
         <div>

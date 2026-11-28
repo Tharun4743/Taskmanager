@@ -116,7 +116,7 @@ export function Sidebar({
                 ? "text-indigo-600"
                 : "text-zinc-500"
             )}>
-              {isAdmin ? "SUPREME ADMIN" : isHOD ? "HOD PORTAL" : isIndustry ? "CORPORATE HR" : isAdvisor ? "ADVISOR" : isCoordinator ? "COORDINATOR" : "STUDENT"}
+              {isAdmin ? "SUPREME ADMIN" : isHOD ? "HOD PORTAL" : isIndustry ? "CORPORATE HR" : isAdvisor ? "ADVISOR" : isCoordinator ? "COORDINATOR" : isFaculty ? "FACULTY" : "STUDENT"}
             </span>
           </div>
         </div>

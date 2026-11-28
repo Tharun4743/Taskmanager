@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Textarea } from '../ui/Textarea';
 import { useToast } from '../../context/ToastContext';
+import { useObjectUrl } from '../../hooks/useObjectUrl';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Badge } from '../ui/Badge';
@@ -76,6 +77,7 @@ export function TeamModal({
   onOpenProofPreview,
 }: TeamModalProps) {
   const { addToast } = useToast();
+  const teamProofPreviewUrl = useObjectUrl(teamProofFile);
   if (!teamModalTask) return null;
 
   const setTeamModalTask = (task: Task | null) => {
@@ -537,66 +539,70 @@ export function TeamModal({
                                         <span className="text-[10px] text-zinc-500">{(teamProofFile.size / (1024 * 1024)).toFixed(2)} MB • Draft</span>
                                       </div>
                                     </div>
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => setProofPreviewData({
-                                          url: URL.createObjectURL(teamProofFile),
-                                          title: currentTaskTeam?.task_title ? `${currentTaskTeam.task_title} (Team Proof Draft)` : 'Team Proof Draft',
-                                          filename: teamProofFile.name,
-                                          size: `${(teamProofFile.size / (1024 * 1024)).toFixed(2)} MB`,
-                                          isDraft: true,
-                                          onDeleteFile: () => {
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        {teamProofPreviewUrl && (
+                                          <button
+                                            type="button"
+                                            onClick={() => setProofPreviewData({
+                                              url: teamProofPreviewUrl,
+                                              title: currentTaskTeam?.task_title ? `${currentTaskTeam.task_title} (Team Proof Draft)` : 'Team Proof Draft',
+                                              filename: teamProofFile.name,
+                                              size: `${(teamProofFile.size / (1024 * 1024)).toFixed(2)} MB`,
+                                              isDraft: true,
+                                              onDeleteFile: () => {
+                                                setTeamProofFile(null);
+                                                const teamInput = document.getElementById('team-proof-file-input') as HTMLInputElement | null;
+                                                if (teamInput) teamInput.value = '';
+                                                addToast('Team proof screenshot removed', 'info');
+                                              }
+                                            })}
+                                            className="text-xs font-bold text-indigo-700 hover:text-indigo-950 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition-colors flex items-center gap-1 shadow-xs cursor-pointer"
+                                            title="Preview team proof before submitting"
+                                          >
+                                            <Maximize2 size={13} /> Fullscreen Zoom
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
                                             setTeamProofFile(null);
                                             const teamInput = document.getElementById('team-proof-file-input') as HTMLInputElement | null;
                                             if (teamInput) teamInput.value = '';
                                             addToast('Team proof screenshot removed', 'info');
-                                          }
-                                        })}
-                                        className="text-xs font-bold text-indigo-700 hover:text-indigo-950 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition-colors flex items-center gap-1 shadow-xs cursor-pointer"
-                                        title="Preview team proof before submitting"
-                                      >
-                                        <Maximize2 size={13} /> Fullscreen Zoom
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
+                                          }}
+                                          className="text-xs font-bold text-red-600 hover:text-red-800 flex items-center gap-1 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg border border-red-200 shrink-0 transition-colors"
+                                          title="Delete screenshot before submission"
+                                        >
+                                          <Trash2 size={13} /> Remove
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {/* Team Proof Preview Viewport */}
+                                    <div
+                                      onClick={() => teamProofPreviewUrl && setProofPreviewData({
+                                        url: teamProofPreviewUrl,
+                                        title: currentTaskTeam?.task_title ? `${currentTaskTeam.task_title} (Team Proof Draft)` : 'Team Proof Draft',
+                                        filename: teamProofFile.name,
+                                        size: `${(teamProofFile.size / (1024 * 1024)).toFixed(2)} MB`,
+                                        isDraft: true,
+                                        onDeleteFile: () => {
                                           setTeamProofFile(null);
                                           const teamInput = document.getElementById('team-proof-file-input') as HTMLInputElement | null;
                                           if (teamInput) teamInput.value = '';
                                           addToast('Team proof screenshot removed', 'info');
-                                        }}
-                                        className="text-xs font-bold text-red-600 hover:text-red-800 flex items-center gap-1 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg border border-red-200 shrink-0 transition-colors"
-                                        title="Delete screenshot before submission"
-                                      >
-                                        <Trash2 size={13} /> Remove
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  {/* Team Proof Preview Viewport */}
-                                  <div
-                                    onClick={() => setProofPreviewData({
-                                      url: URL.createObjectURL(teamProofFile),
-                                      title: currentTaskTeam?.task_title ? `${currentTaskTeam.task_title} (Team Proof Draft)` : 'Team Proof Draft',
-                                      filename: teamProofFile.name,
-                                      size: `${(teamProofFile.size / (1024 * 1024)).toFixed(2)} MB`,
-                                      isDraft: true,
-                                      onDeleteFile: () => {
-                                        setTeamProofFile(null);
-                                        const teamInput = document.getElementById('team-proof-file-input') as HTMLInputElement | null;
-                                        if (teamInput) teamInput.value = '';
-                                        addToast('Team proof screenshot removed', 'info');
-                                      }
-                                    })}
-                                    className="relative w-full max-h-64 rounded-xl overflow-hidden border border-indigo-200 bg-zinc-950/5 flex items-center justify-center cursor-pointer group/teamview shadow-inner p-2"
-                                    title="Click to inspect team proof in 350% zoom modal"
-                                  >
-                                    <img
-                                      src={URL.createObjectURL(teamProofFile)}
-                                      alt="Team proof preview"
-                                      className="max-h-56 w-auto max-w-full rounded-lg object-contain transition-transform duration-200 group-hover/teamview:scale-[1.01]"
-                                    />
+                                        }
+                                      })}
+                                      className="relative w-full max-h-64 rounded-xl overflow-hidden border border-indigo-200 bg-zinc-950/5 flex items-center justify-center cursor-pointer group/teamview shadow-inner p-2"
+                                      title="Click to inspect team proof in 350% zoom modal"
+                                    >
+                                      {teamProofPreviewUrl && (
+                                        <img
+                                          src={teamProofPreviewUrl}
+                                          alt="Team proof preview"
+                                          className="max-h-56 w-auto max-w-full rounded-lg object-contain transition-transform duration-200 group-hover/teamview:scale-[1.01]"
+                                        />
+                                      )}
                                     <div className="absolute inset-0 bg-black/35 opacity-0 group-hover/teamview:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-bold gap-2">
                                       <Eye size={16} /> Click for 350% Zoom & Pan
                                     </div>

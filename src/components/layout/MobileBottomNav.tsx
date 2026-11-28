@@ -76,7 +76,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   const isFaculty = role === 'FACULTY' || role === 'STAFF';
   const isHOD = role === 'HOD';
   const isAdmin = role === 'SUPREME_ADMIN';
-  const isIndustry = role === 'INDUSTRY';
+  const isIndustry = role === 'INDUSTRY' || role === 'INDUSTRY_GUEST';
 
   // 1. Build primary 5 navigation items based on role
   const getPrimaryNavItems = (): NavItem[] => {
@@ -210,7 +210,6 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         { id: 'coding-progress', label: 'Coding Progress', description: 'Track classmate LeetCode and GitHub activity', view: 'leetcode-targets', icon: <Code2 className="text-indigo-500" size={20} /> },
         { id: 'skill-gap', label: 'Progress Analyzer', description: 'Class-wide task completion metrics', view: 'skill-gap-analyzer', icon: <Zap className="text-amber-500" size={20} /> },
         { id: 'teaching-hub', label: 'Live Teaching Hub', description: 'Interactive classroom sessions', view: 'live-teaching-hub', icon: <Radio className="text-rose-500" size={20} /> },
-        { id: 'heatmap', label: 'Skill Heatmap', description: 'Institutional readiness overview', view: 'institutional-skill-heatmap', icon: <BarChart3 className="text-pink-500" size={20} /> },
         { id: 'submissions', label: 'My Submissions', description: 'Personal task submissions ledger', view: 'submissions', icon: <CheckSquare className="text-teal-500" size={20} /> },
         { id: 'profile', label: 'My Profile', description: 'Your personal academic credentials', view: 'profile', icon: <User className="text-blue-500" size={20} /> },
         { id: 'settings', label: 'Settings', description: 'Account and notification configuration', view: 'settings', icon: <Settings className="text-slate-500" size={20} /> }
@@ -244,8 +243,10 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
     if (isHOD) {
       return [
         { id: 'tasks', label: 'Tasks', description: 'Create and broadcast department tasks', view: 'tasks', icon: <CheckSquare className="text-emerald-500" size={20} /> },
+        { id: 'verifications', label: 'Verifications', description: 'Review department student submissions', view: 'verifications', icon: <ShieldCheck className="text-teal-500" size={20} />, badge: pendingVerificationCount },
         { id: 'classes', label: 'Classes & Sections', description: 'Configure department classes and sections', view: 'classes', icon: <Building2 className="text-violet-500" size={20} /> },
         { id: 'industry-approvals', label: 'Industry Partners', description: 'Review corporate HR partnership applications', view: 'industry-approvals', icon: <Briefcase className="text-amber-500" size={20} /> },
+        { id: 'heatmap', label: 'Skill Heatmap', description: 'Departmental skill readiness matrix', view: 'institutional-skill-heatmap', icon: <BarChart3 className="text-pink-500" size={20} /> },
         { id: 'notices', label: 'Notice Board', description: 'Broadcast high-priority notices', view: 'notice-board', icon: <Bell className="text-amber-500" size={20} /> },
         { id: 'coding-progress', label: 'Coding Benchmarks', description: 'Department-wide LeetCode & GitHub stats', view: 'leetcode-targets', icon: <Code2 className="text-indigo-500" size={20} /> },
         { id: 'teaching-hub', label: 'Live Teaching Hub', description: 'Faculty lecture schedules and active hubs', view: 'live-teaching-hub', icon: <Radio className="text-rose-500" size={20} /> },
