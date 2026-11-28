@@ -206,6 +206,7 @@ export function useAppData() {
   const [teamModalTask, setTeamModalTask] = useState<Task | null>(null);
   const [currentTaskTeam, setCurrentTaskTeam] = useState<Team | null>(null);
   const [eligibleClassmates, setEligibleClassmates] = useState<any[]>([]);
+  const [isLoadingClassmates, setIsLoadingClassmates] = useState<boolean>(false);
   const [selectedClassmateIds, setSelectedClassmateIds] = useState<string[]>([]);
   const [classmateSearchTerm, setClassmateSearchTerm] = useState<string>('');
   const [newTeamName, setNewTeamName] = useState<string>('');
@@ -763,33 +764,48 @@ export function useAppData() {
     setTeamProofFile(null);
     setTeamRemarks('');
     setSelectedClassmateIds([]);
+    setClassmateSearchTerm('');
     setNewTeamName('');
+    setEligibleClassmates([]);
 
     if (!token) return;
+    const isStudentUser = user?.role === 'STUDENT';
+    if (isStudentUser) setIsLoadingClassmates(true);
     try {
-      const res = await fetch(`${API_URL}/api/team/task/${task.id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
+      const requests: Promise<Response>[] = [
+        fetch(`${API_URL}/api/team/task/${task.id}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+      ];
+      if (isStudentUser) {
+        requests.push(
+          fetch(`${API_URL}/api/team/classmates/${task.id}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          })
+        );
+      }
+
+      const [res, classmatesRes] = await Promise.all(requests);
+      if (res?.ok) {
         const data = await res.json();
         setCurrentTaskTeam(data.team || null);
-
-        if (!data.team && user?.role === 'STUDENT') {
-          const classmatesRes = await fetch(`${API_URL}/api/team/classmates/${task.id}`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (classmatesRes.ok) {
-            setEligibleClassmates(await classmatesRes.json());
-          }
-        }
+      }
+      if (classmatesRes?.ok) {
+        const cmData = await classmatesRes.json();
+        setEligibleClassmates(Array.isArray(cmData) ? cmData : []);
       }
     } catch {
       addToast('Failed to load team details', 'error');
+    } finally {
+      setIsLoadingClassmates(false);
     }
   }, [token, user?.role, addToast]);
 
   const handleCreateTeam = useCallback(async () => {
-    if (!teamModalTask || !newTeamName.trim() || selectedClassmateIds.length === 0) return;
+    if (!teamModalTask) return;
+    if (!newTeamName.trim()) {
+      return addToast('Please enter a team name', 'error');
+    }
     setIsSubmittingTeam(true);
     try {
       const res = await fetch(`${API_URL}/api/team/create`, {
@@ -803,7 +819,12 @@ export function useAppData() {
       });
       const data = await res.json();
       if (res.ok) {
-        addToast('Team created successfully and invitations sent!', 'success');
+        addToast(
+          selectedClassmateIds.length > 0
+            ? 'Team created successfully and invitations sent!'
+            : 'Team created successfully! You can invite classmates below.',
+          'success'
+        );
         setNewTeamName('');
         setSelectedClassmateIds([]);
         openTeamModal(teamModalTask);
@@ -849,6 +870,7 @@ export function useAppData() {
 
   const handleInviteMoreClassmates = useCallback(async () => {
     if (!currentTaskTeam || selectedClassmateIds.length === 0) return;
+    setIsSubmittingTeam(true);
     try {
       const res = await fetch(`${API_URL}/api/team/invite`, {
         method: 'POST',
@@ -868,6 +890,8 @@ export function useAppData() {
       }
     } catch {
       addToast('Network error sending invitations', 'error');
+    } finally {
+      setIsSubmittingTeam(false);
     }
   }, [currentTaskTeam, selectedClassmateIds, teamModalTask, token, openTeamModal, addToast]);
 
@@ -1310,7 +1334,7 @@ export function useAppData() {
     showRejectionModal, setShowRejectionModal, rejectionReason, setRejectionReason,
     teamReviewModal, setTeamReviewModal,
     teamModalTask, setTeamModalTask, currentTaskTeam, setCurrentTaskTeam,
-    eligibleClassmates, selectedClassmateIds, setSelectedClassmateIds,
+    eligibleClassmates, isLoadingClassmates, selectedClassmateIds, setSelectedClassmateIds,
     classmateSearchTerm, setClassmateSearchTerm, newTeamName, setNewTeamName,
     teamProofFile, setTeamProofFile, teamRemarks, setTeamRemarks,
     isSubmittingTeam, openTeamModal, handleCreateTeam, handleCreateSoloTeam,

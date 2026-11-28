@@ -4030,7 +4030,7 @@ async function startServer() {
 
   // ── Team Tasks Management APIs ─────────────────────────────────────────────
 
-  // 1. Get eligible classmates for team task (excluding current user and already ACCEPTED team members/leaders)
+  // 1. Get eligible classmates for team task (excluding current user and already ACCEPTED team members/leaders, plus caller's own PENDING invitees)
   app.get('/api/team/classmates/:taskId', authenticate, authorize(['STUDENT']), async (req: any, res) => {
     const student = req.user;
     if (!student.class_id) return res.status(400).json({ error: 'You are not assigned to any class.' });
@@ -4039,17 +4039,24 @@ async function startServer() {
       const classmatesRes = await pool.query(`
         SELECT u.id, u.full_name, u.register_number, u.username
         FROM users u
-        WHERE u.class_id = $1 
-          AND u.role = 'STUDENT' 
+        WHERE u.class_id = $1
+          AND u.role = 'STUDENT'
           AND u.id != $2
-          AND u.id NOT IN (
-            SELECT tm.student_id 
+          AND NOT EXISTS (
+            SELECT 1
             FROM team_members tm
             JOIN teams t ON tm.team_id = t.id
-            WHERE t.task_id = $3 AND tm.status = 'ACCEPTED' AND t.status != 'REJECTED'
+            WHERE t.task_id = $3
+              AND tm.student_id = u.id
+              AND COALESCE(t.status, '') != 'REJECTED'
+              AND (tm.status = 'ACCEPTED' OR (t.leader_id = $2 AND tm.status = 'PENDING'))
           )
-          AND u.id NOT IN (
-            SELECT leader_id FROM teams WHERE task_id = $3 AND status != 'REJECTED'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM teams t2
+            WHERE t2.task_id = $3
+              AND t2.leader_id = u.id
+              AND COALESCE(t2.status, '') != 'REJECTED'
           )
         ORDER BY u.register_number ASC, u.full_name ASC
       `, [student.class_id, student.id, req.params.taskId]);
@@ -4148,6 +4155,7 @@ async function startServer() {
       }
 
       await client.query('COMMIT');
+      invalidateApiCache('notifs_');
       res.json({ success: true, team });
     } catch (err: any) {
       await client.query('ROLLBACK');
@@ -4218,10 +4226,16 @@ async function startServer() {
           ON CONFLICT (team_id, student_id) DO UPDATE SET status = 'PENDING'
         `, [teamId, mId]);
 
-        await client.query(`
-          INSERT INTO team_invitations (team_id, student_id, invited_by, status)
-          VALUES ($1, $2, $3, 'PENDING')
-        `, [teamId, mId, student.id]);
+        const existingPendingInv = await client.query(
+          `SELECT id FROM team_invitations WHERE team_id = $1 AND student_id = $2 AND status = 'PENDING' LIMIT 1`,
+          [teamId, mId]
+        );
+        if (existingPendingInv.rowCount === 0) {
+          await client.query(`
+            INSERT INTO team_invitations (team_id, student_id, invited_by, status)
+            VALUES ($1, $2, $3, 'PENDING')
+          `, [teamId, mId, student.id]);
+        }
 
         await client.query(`
           INSERT INTO notifications (user_id, message, type)
@@ -4229,6 +4243,7 @@ async function startServer() {
         `, [mId, `You have been invited to join team "${team.team_name}" for task "${task.title}"`]);
       }
       await client.query('COMMIT');
+      invalidateApiCache('notifs_');
       res.json({ success: true });
     } catch (err: any) {
       await client.query('ROLLBACK');

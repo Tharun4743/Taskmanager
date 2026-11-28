@@ -126,13 +126,20 @@ export function GlobalModals({ app }: { app: any }) {
           selectedClassmateIds={app.selectedClassmateIds}
           setSelectedClassmateIds={app.setSelectedClassmateIds}
           classmatesList={app.eligibleClassmates || []}
+          eligibleClassmates={app.eligibleClassmates || []}
+          isLoadingClassmates={Boolean(app.isLoadingClassmates)}
           teamProofFile={app.teamProofFile}
           setTeamProofFile={app.setTeamProofFile}
           teamRemarks={app.teamRemarks}
           setTeamRemarks={app.setTeamRemarks}
-          isCreatingTeam={Boolean(app.isCreatingTeam)}
+          isCreatingTeam={Boolean(app.isSubmittingTeam)}
+          isSubmittingTeam={Boolean(app.isSubmittingTeam)}
           isSubmittingProof={Boolean(app.isSubmittingTeam)}
-          onClose={() => app.setTeamModalTask(null)}
+          onClose={() => {
+            app.setTeamModalTask(null);
+            app.setSelectedClassmateIds?.([]);
+            app.setClassmateSearchTerm?.('');
+          }}
           handleCreateTeam={app.handleCreateTeam}
           handleCreateSoloTeam={app.handleCreateSoloTeam}
           handleInviteMoreClassmates={app.handleInviteMoreClassmates}

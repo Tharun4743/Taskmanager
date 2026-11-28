@@ -42,6 +42,7 @@ export interface TeamModalProps {
   handleSubmitTeamProof: () => void;
   setCurrentTaskTeam?: (team: any) => void;
   eligibleClassmates?: any[];
+  isLoadingClassmates?: boolean;
   isSubmittingTeam?: boolean;
   onOpenProofPreview?: (data: ProofPreviewData) => void;
 }
@@ -73,12 +74,18 @@ export function TeamModal({
   handleSubmitTeamProof,
   setCurrentTaskTeam: propSetCurrentTaskTeam,
   eligibleClassmates = [],
+  isLoadingClassmates = false,
   isSubmittingTeam = false,
   onOpenProofPreview,
 }: TeamModalProps) {
   const { addToast } = useToast();
   const teamProofPreviewUrl = useObjectUrl(teamProofFile);
   if (!teamModalTask) return null;
+
+  const availableClassmates = (eligibleClassmates && eligibleClassmates.length > 0)
+    ? eligibleClassmates
+    : (classmatesList || []);
+  const busySubmitting = Boolean(isSubmittingTeam || isCreatingTeam || isSubmittingProof);
 
   const setTeamModalTask = (task: Task | null) => {
     if (!task) onClose();
@@ -146,7 +153,7 @@ export function TeamModal({
                           </span>
                         </div>
 
-                        {eligibleClassmates.length > 0 && (
+                        {availableClassmates.length > 0 && (
                           <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
                             <Input
@@ -159,7 +166,16 @@ export function TeamModal({
                         )}
 
                         {(() => {
-                          const filtered = eligibleClassmates.filter(s =>
+                          if (isLoadingClassmates && availableClassmates.length === 0) {
+                            return (
+                              <div className="p-6 bg-zinc-50 border border-zinc-200 rounded-2xl text-center text-xs text-zinc-500 flex items-center justify-center gap-2">
+                                <Loader2 size={15} className="animate-spin text-indigo-600" />
+                                Loading available classmates in your section...
+                              </div>
+                            );
+                          }
+
+                          const filtered = availableClassmates.filter(s =>
                             !classmateSearchTerm ||
                             (s.full_name || '').toLowerCase().includes(classmateSearchTerm.toLowerCase()) ||
                             (s.register_number || '').toLowerCase().includes(classmateSearchTerm.toLowerCase()) ||
@@ -223,7 +239,7 @@ export function TeamModal({
                       <div className="flex flex-col sm:flex-row gap-3">
                         <Button
                           onClick={handleCreateSoloTeam}
-                          disabled={isSubmittingTeam}
+                          disabled={busySubmitting}
                           variant="secondary"
                           className="flex-1 h-12 border-zinc-300 font-bold rounded-2xl flex items-center justify-center gap-2 text-xs"
                         >
@@ -231,10 +247,11 @@ export function TeamModal({
                         </Button>
                         <Button
                           onClick={handleCreateTeam}
-                          disabled={isSubmittingTeam || !newTeamName.trim()}
+                          disabled={busySubmitting || !newTeamName.trim()}
                           className="flex-1 h-12 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl flex items-center justify-center gap-2 text-xs"
                         >
-                          {isSubmittingTeam ? <Loader2 size={18} className="animate-spin" /> : <Users size={16} />} Create Team & Send Invites
+                          {busySubmitting ? <Loader2 size={18} className="animate-spin" /> : <Users size={16} />}{' '}
+                          {selectedClassmateIds.length > 0 ? `Create Team & Send Invites (${selectedClassmateIds.length})` : 'Create Team'}
                         </Button>
                       </div>
                     </div>
@@ -371,7 +388,11 @@ export function TeamModal({
                             </span>
                           </div>
 
-                          {eligibleClassmates.length > 0 ? (
+                          {isLoadingClassmates && availableClassmates.length === 0 ? (
+                            <p className="text-xs text-zinc-400 flex items-center gap-1.5">
+                              <Loader2 size={13} className="animate-spin text-indigo-600" /> Loading available classmates...
+                            </p>
+                          ) : availableClassmates.length > 0 ? (
                             <div className="space-y-3">
                               <div className="relative">
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
@@ -384,7 +405,7 @@ export function TeamModal({
                               </div>
 
                               {(() => {
-                                const filtered = eligibleClassmates.filter(s =>
+                                const filtered = availableClassmates.filter(s =>
                                   !classmateSearchTerm ||
                                   (s.full_name || '').toLowerCase().includes(classmateSearchTerm.toLowerCase()) ||
                                   (s.register_number || '').toLowerCase().includes(classmateSearchTerm.toLowerCase()) ||
@@ -448,9 +469,10 @@ export function TeamModal({
                               {selectedClassmateIds.length > 0 && (
                                 <Button
                                   onClick={handleInviteMoreClassmates}
+                                  disabled={busySubmitting}
                                   className="w-full h-10 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2"
                                 >
-                                  <UserPlus size={16} /> Send Invitation ({selectedClassmateIds.length})
+                                  {busySubmitting ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />} Send Invitation ({selectedClassmateIds.length})
                                 </Button>
                               )}
                             </div>

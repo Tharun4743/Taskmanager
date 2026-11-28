@@ -457,6 +457,39 @@ try {
     /loadingGithub && sortedGithubProgressList\.length === 0/.test(codingViewSource),
     'src/modules/coding/CodingProgressView.tsx avoids client-filter refetches, lazy-loads GitHub tab, and shows loading rows'
   );
+
+  // Team creation & classmate selection regression gates
+  const globalModalsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'modals', 'GlobalModals.tsx'), 'utf8');
+  const teamModalSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'modals', 'TeamModal.tsx'), 'utf8');
+  const classmatesRouteSlice = serverSource.slice(
+    serverSource.indexOf("app.get('/api/team/classmates/:taskId'"),
+    serverSource.indexOf("app.post('/api/team/create'")
+  );
+  assert(
+    /eligibleClassmates=\{app\.eligibleClassmates \|\| \[\]\}/.test(globalModalsSource) &&
+    /isSubmittingTeam=\{Boolean\(app\.isSubmittingTeam\)\}/.test(globalModalsSource) &&
+    /isLoadingClassmates=\{Boolean\(app\.isLoadingClassmates\)\}/.test(globalModalsSource),
+    'GlobalModals passes eligibleClassmates, isLoadingClassmates, and isSubmittingTeam props to TeamModal'
+  );
+  assert(
+    /availableClassmates/.test(teamModalSource) &&
+    /isLoadingClassmates && availableClassmates\.length === 0/.test(teamModalSource) &&
+    /classmatesList \|\| \[\]/.test(teamModalSource),
+    'TeamModal supports both eligibleClassmates and classmatesList and renders loading state'
+  );
+  const openTeamSlice = useAppDataSource.slice(
+    useAppDataSource.indexOf('const openTeamModal = useCallback'),
+    useAppDataSource.indexOf('const handleCreateSoloTeam = useCallback')
+  );
+  assert(
+    !/!\s*data\.team\s*&&\s*user\?\.role === 'STUDENT'/.test(openTeamSlice) &&
+    !/!\s*newTeamName\.trim\(\)\s*\|\|\s*selectedClassmateIds\.length === 0/.test(openTeamSlice),
+    'useAppData openTeamModal fetches classmates for leader invites too and handleCreateTeam supports optional initial invites'
+  );
+  assert(
+    !/\bNOT IN\b/i.test(classmatesRouteSlice) && /NOT EXISTS/i.test(classmatesRouteSlice),
+    'server.ts GET /api/team/classmates/:taskId uses NULL-safe NOT EXISTS instead of NOT IN'
+  );
 } catch (err) {
   console.error('  [ERROR] Group 6 failed:', err);
   testsFailed++;
