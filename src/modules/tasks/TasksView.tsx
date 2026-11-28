@@ -194,13 +194,13 @@ export function TasksView({
 
   // Filters & submission staging
   const [studentTaskFilter, setStudentTaskFilter] = useState<'ALL' | 'PENDING_ACTION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'NOT_INTERESTED' | 'OVERDUE'>('ALL');
-  const [customFieldValues, setCustomFieldValues] = useState<Record<number, string>>({});
-  const [selectedFiles, setSelectedFiles] = useState<Record<number, File>>({});
-  const [isDraggingScreenshot, setIsDraggingScreenshot] = useState<number | null>(null);
-  const [notParticipating, setNotParticipating] = useState<Record<number, boolean>>({});
-  const [notParticipatingReason, setNotParticipatingReason] = useState<Record<number, string>>({});
-  const [isEditingOptOut, setIsEditingOptOut] = useState<Record<number, boolean>>({});
-  const [uploading, setUploading] = useState<number | null>(null);
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
+  const [selectedFiles, setSelectedFiles] = useState<Record<string, File>>({});
+  const [isDraggingScreenshot, setIsDraggingScreenshot] = useState<string | null>(null);
+  const [notParticipating, setNotParticipating] = useState<Record<string, boolean>>({});
+  const [notParticipatingReason, setNotParticipatingReason] = useState<Record<string, string>>({});
+  const [isEditingOptOut, setIsEditingOptOut] = useState<Record<string, boolean>>({});
+  const [uploading, setUploading] = useState<string | null>(null);
 
   // Modals inside TasksView
   const [selectedPosterModal, setSelectedPosterModal] = useState<string | null>(null);
@@ -403,19 +403,19 @@ export function TasksView({
   };
 
   const submitTask = async (taskId: number | string) => {
-    const numId = Number(taskId);
-    const fileForTask = selectedFiles[numId];
+    const sId = String(taskId);
+    const fileForTask = selectedFiles[sId] || selectedFiles[taskId as any];
     if (!fileForTask) return addToast('Screenshot is required to participate.', 'error');
 
-    const targetTask = tasks.find(t => t.id === numId);
+    const targetTask = tasks.find(t => String(t.id) === sId);
     const reqLabel = (targetTask?.custom_field_label || '').trim();
-    const taskCustomVal = (customFieldValues[numId] || '').trim();
+    const taskCustomVal = (customFieldValues[sId] || customFieldValues[taskId as any] || '').trim();
 
     if (reqLabel && !taskCustomVal) {
       return addToast(`Please enter ${reqLabel}.`, 'error');
     }
 
-    setUploading(numId);
+    setUploading(sId);
 
     // Client-side compression with automatic safe fallback
     const compressImage = async (file: File): Promise<{ blob: Blob; filename: string }> => {
@@ -478,7 +478,7 @@ export function TasksView({
       }
 
       const formData = new FormData();
-      formData.append('task_id', numId.toString());
+      formData.append('task_id', sId);
       formData.append('screenshot', fileToUpload, uploadFilename);
       formData.append('original_filename', fileForTask.name);
       if (taskCustomVal) {
@@ -493,12 +493,14 @@ export function TasksView({
       if (res.ok) {
         setSelectedFiles(prev => {
           const next = { ...prev };
-          delete next[numId];
+          delete next[sId];
+          delete next[taskId as any];
           return next;
         });
         setCustomFieldValues(prev => {
           const next = { ...prev };
-          delete next[numId];
+          delete next[sId];
+          delete next[taskId as any];
           return next;
         });
         addToast('Task submitted successfully!', 'success');
@@ -520,19 +522,20 @@ export function TasksView({
   };
 
   const submitNotParticipating = async (taskId: number | string) => {
-    const reason = notParticipatingReason[Number(taskId)] || '';
+    const sId = String(taskId);
+    const reason = notParticipatingReason[sId] || notParticipatingReason[taskId as any] || '';
     if (!reason.trim()) return addToast('Please enter your reason for not participating.', 'error');
-    setUploading(Number(taskId));
+    setUploading(sId);
     try {
       const res = await fetch(`${API_URL}/api/submissions/not-participating`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: taskId, not_participating_reason: reason.trim() })
+        body: JSON.stringify({ task_id: sId, not_participating_reason: reason.trim() })
       });
       if (res.ok) {
-        setNotParticipating(prev => ({ ...prev, [Number(taskId)]: false }));
-        setNotParticipatingReason(prev => ({ ...prev, [Number(taskId)]: '' }));
-        setIsEditingOptOut(prev => ({ ...prev, [Number(taskId)]: false }));
+        setNotParticipating(prev => ({ ...prev, [sId]: false, [taskId as any]: false }));
+        setNotParticipatingReason(prev => ({ ...prev, [sId]: '', [taskId as any]: '' }));
+        setIsEditingOptOut(prev => ({ ...prev, [sId]: false, [taskId as any]: false }));
         addToast('Recorded: Not participating in this task.', 'info');
         fetchSubmissions();
         if (user?.role === 'STUDENT' && user?.is_coordinator) {
@@ -555,14 +558,17 @@ export function TasksView({
         addToast('Image size exceeds 5MB limit. Please select a smaller file.', 'error');
         return;
       }
-      setSelectedFiles(prev => ({ ...prev, [Number(taskId)]: file }));
+      const sId = String(taskId);
+      setSelectedFiles(prev => ({ ...prev, [sId]: file, [taskId as any]: file }));
     }
   };
 
   const handleDeleteScreenshot = (taskId: number | string) => {
+    const sId = String(taskId);
     setSelectedFiles(prev => {
       const next = { ...prev };
-      delete next[Number(taskId)];
+      delete next[sId];
+      delete next[taskId as any];
       return next;
     });
     const fileInput = document.getElementById(`file-${taskId}`) as HTMLInputElement | null;
