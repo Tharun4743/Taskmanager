@@ -3276,8 +3276,8 @@ async function startServer() {
 
   const submissionSchemaValidator = z.object({
     task_id: z.string().min(1, 'Task ID is required'),
-    custom_field_value: z.string().optional(),
-    not_participating_reason: z.string().optional(),
+    custom_field_value: z.string().optional().nullable(),
+    not_participating_reason: z.string().optional().nullable(),
     original_filename: z.string().optional().nullable()
   });
 
@@ -4505,9 +4505,10 @@ async function startServer() {
     }
   });
 
-  // 9. POST /api/team/submit
-  app.post('/api/team/submit', authenticate, authorize(['STUDENT']), memoryUpload.single('screenshot'), async (req: any, res) => {
-    const { teamId, remarks } = req.body;
+  // 9. POST /api/team/submit & /api/teams/:id/submit
+  app.post(['/api/team/submit', '/api/teams/:id/submit'], authenticate, authorize(['STUDENT']), memoryUpload.single('screenshot'), async (req: any, res) => {
+    const teamId = req.params.id || req.body.teamId;
+    const remarks = req.body.remarks;
     const student = req.user;
 
     if (!teamId) return res.status(400).json({ error: 'Team ID is required' });

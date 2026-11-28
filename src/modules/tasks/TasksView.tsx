@@ -194,7 +194,7 @@ export function TasksView({
 
   // Filters & submission staging
   const [studentTaskFilter, setStudentTaskFilter] = useState<'ALL' | 'PENDING_ACTION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'NOT_INTERESTED' | 'OVERDUE'>('ALL');
-  const [customFieldValue, setCustomFieldValue] = useState('');
+  const [customFieldValues, setCustomFieldValues] = useState<Record<number, string>>({});
   const [selectedFiles, setSelectedFiles] = useState<Record<number, File>>({});
   const [isDraggingScreenshot, setIsDraggingScreenshot] = useState<number | null>(null);
   const [notParticipating, setNotParticipating] = useState<Record<number, boolean>>({});
@@ -403,57 +403,87 @@ export function TasksView({
   };
 
   const submitTask = async (taskId: number | string) => {
-    const fileForTask = selectedFiles[Number(taskId)];
+    const numId = Number(taskId);
+    const fileForTask = selectedFiles[numId];
     if (!fileForTask) return addToast('Screenshot is required to participate.', 'error');
-    if (!customFieldValue.trim()) return addToast('Please fill the required custom field.', 'error');
 
-    setUploading(Number(taskId));
+    const targetTask = tasks.find(t => t.id === numId);
+    const reqLabel = (targetTask?.custom_field_label || '').trim();
+    const taskCustomVal = (customFieldValues[numId] || '').trim();
 
-    // Client-side compression
-    const compressImage = (file: File): Promise<Blob> => {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = (event) => {
-          const img = new Image();
-          img.src = event.target?.result as string;
-          img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const MAX_WIDTH = 1200;
-            const MAX_HEIGHT = 1200;
-            let width = img.width;
-            let height = img.height;
+    if (reqLabel && !taskCustomVal) {
+      return addToast(`Please enter ${reqLabel}.`, 'error');
+    }
 
-            if (width > height) {
-              if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
-            } else {
-              if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
-            }
-            canvas.width = width; canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx?.drawImage(img, 0, 0, width, height);
-            canvas.toBlob((blob) => {
-              if (blob) resolve(blob); else reject(new Error('Canvas failed'));
-            }, 'image/jpeg', 0.8);
+    setUploading(numId);
+
+    // Client-side compression with automatic safe fallback
+    const compressImage = async (file: File): Promise<{ blob: Blob; filename: string }> => {
+      try {
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = (event) => {
+            const img = new Image();
+            img.src = event.target?.result as string;
+            img.onload = () => {
+              try {
+                const canvas = document.createElement('canvas');
+                const MAX_WIDTH = 1200;
+                const MAX_HEIGHT = 1200;
+                let width = img.width;
+                let height = img.height;
+
+                if (width > height) {
+                  if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+                } else {
+                  if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+                }
+                canvas.width = Math.round(width);
+                canvas.height = Math.round(height);
+                const ctx = canvas.getContext('2d');
+                if (!ctx) return reject(new Error('Canvas context unavailable'));
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                canvas.toBlob((blob) => {
+                  if (blob) {
+                    const baseName = file.name.substring(0, file.name.lastIndexOf('.')) || 'screenshot';
+                    resolve({ blob, filename: `${baseName}.jpg` });
+                  } else {
+                    reject(new Error('Canvas toBlob failed'));
+                  }
+                }, 'image/jpeg', 0.82);
+              } catch (canvasErr) {
+                reject(canvasErr);
+              }
+            };
+            img.onerror = (imgErr) => reject(imgErr);
           };
-          img.onerror = reject;
-        };
-        reader.onerror = reject;
-      });
+          reader.onerror = (readerErr) => reject(readerErr);
+        });
+      } catch (err) {
+        console.warn('Client compression failed, falling back to original file:', err);
+        return { blob: file, filename: file.name };
+      }
     };
 
     try {
       let fileToUpload: Blob | File = fileForTask;
+      let uploadFilename = fileForTask.name;
+
       if (fileForTask.type.startsWith('image/')) {
-        addToast('Compressing image...', 'info');
-        fileToUpload = await compressImage(fileForTask);
+        addToast('Optimizing screenshot...', 'info');
+        const compressed = await compressImage(fileForTask);
+        fileToUpload = compressed.blob;
+        uploadFilename = compressed.filename;
       }
 
       const formData = new FormData();
-      formData.append('task_id', taskId.toString());
-      formData.append('screenshot', fileToUpload, fileForTask.name);
+      formData.append('task_id', numId.toString());
+      formData.append('screenshot', fileToUpload, uploadFilename);
       formData.append('original_filename', fileForTask.name);
-      formData.append('custom_field_value', customFieldValue);
+      if (taskCustomVal) {
+        formData.append('custom_field_value', taskCustomVal);
+      }
 
       const res = await fetch(`${API_URL}/api/submissions`, {
         method: 'POST',
@@ -463,10 +493,14 @@ export function TasksView({
       if (res.ok) {
         setSelectedFiles(prev => {
           const next = { ...prev };
-          delete next[Number(taskId)];
+          delete next[numId];
           return next;
         });
-        setCustomFieldValue('');
+        setCustomFieldValues(prev => {
+          const next = { ...prev };
+          delete next[numId];
+          return next;
+        });
         addToast('Task submitted successfully!', 'success');
         // Only refresh submissions after submitting
         fetchSubmissions();
@@ -474,13 +508,15 @@ export function TasksView({
           fetchCoordinatorStats();
         }
       } else {
-        const data = await res.json();
-        addToast(`Submission failed: ${data.error}`, 'error');
+        const data = await res.json().catch(() => ({}));
+        addToast(`Submission failed: ${data.error || 'Server error'}`, 'error');
       }
-    } catch (e) {
-      addToast('Network error during submission', 'error');
+    } catch (e: any) {
+      console.error('Submission error:', e);
+      addToast(e?.message ? `Submission error: ${e.message}` : 'Network error during submission. Please try again.', 'error');
+    } finally {
+      setUploading(null);
     }
-    setUploading(null);
   };
 
   const submitNotParticipating = async (taskId: number | string) => {
@@ -1539,39 +1575,41 @@ export function TasksView({
                                               </Button>
                                             </div>
                                           ) : (
-                                            /* ── If PARTICIPATING: custom field + screenshot both mandatory ── */
+                                            /* ── If PARTICIPATING: custom field (if requested) + screenshot mandatory ── */
                                             <div className="space-y-4 pt-1">
+                                              {Boolean(task.custom_field_label && task.custom_field_label.trim()) && (
+                                                <div>
+                                                  <label className="text-sm font-bold text-zinc-700 dark:text-zinc-300 mb-1.5 flex items-center gap-1">
+                                                    {task.custom_field_label}
+                                                    <span className="text-red-500 ml-0.5">*</span>
+                                                    <span className="text-[10px] font-medium text-zinc-400 ml-1">(Required)</span>
+                                                  </label>
+                                                  {task.custom_field_label?.trim() === 'Have you registered?' ? (
+                                                    <select
+                                                      value={customFieldValues[task.id] || ''}
+                                                      onChange={e => setCustomFieldValues(prev => ({ ...prev, [task.id]: e.target.value }))}
+                                                      className={cn(
+                                                        "w-full h-10 px-3 rounded-xl border bg-white dark:bg-zinc-900 text-sm font-semibold transition-all focus:outline-none focus:ring-2 focus:ring-black",
+                                                        !(customFieldValues[task.id] || '').trim() ? "border-red-200 focus:border-red-400" : "border-zinc-200 dark:border-zinc-700"
+                                                      )}
+                                                      required
+                                                    >
+                                                      <option value="" disabled>Select (Yes / No)</option>
+                                                      <option value="Yes">Yes</option>
+                                                      <option value="No">No</option>
+                                                    </select>
+                                                  ) : (
+                                                    <Input
+                                                      placeholder={`Enter ${task.custom_field_label}...`}
+                                                      value={customFieldValues[task.id] || ''}
+                                                      onChange={e => setCustomFieldValues(prev => ({ ...prev, [task.id]: e.target.value }))}
+                                                      className={cn(!(customFieldValues[task.id] || '').trim() && 'border-red-200 focus:border-red-400')}
+                                                    />
+                                                  )}
+                                                </div>
+                                              )}
                                               <div>
-                                                <label className="text-sm font-bold text-zinc-700 mb-1.5 flex items-center gap-1">
-                                                  {task.custom_field_label || 'Custom Field'}
-                                                  <span className="text-red-500 ml-0.5">*</span>
-                                                  <span className="text-[10px] font-medium text-zinc-400 ml-1">(Required)</span>
-                                                </label>
-                                                {task.custom_field_label?.trim() === 'Have you registered?' ? (
-                                                  <select
-                                                    value={customFieldValue}
-                                                    onChange={e => setCustomFieldValue(e.target.value)}
-                                                    className={cn(
-                                                      "w-full h-10 px-3 rounded-xl border bg-white dark:bg-zinc-900 text-sm font-semibold transition-all focus:outline-none focus:ring-2 focus:ring-black",
-                                                      !customFieldValue.trim() ? "border-red-200 focus:border-red-400" : "border-zinc-200 dark:border-zinc-700"
-                                                    )}
-                                                    required
-                                                  >
-                                                    <option value="" disabled>Select (Yes / No)</option>
-                                                    <option value="Yes">Yes</option>
-                                                    <option value="No">No</option>
-                                                  </select>
-                                                ) : (
-                                                  <Input
-                                                    placeholder={`Enter ${task.custom_field_label || 'required detail'}...`}
-                                                    value={customFieldValue}
-                                                    onChange={e => setCustomFieldValue(e.target.value)}
-                                                    className={cn(!customFieldValue.trim() && 'border-red-200 focus:border-red-400')}
-                                                  />
-                                                )}
-                                              </div>
-                                              <div>
-                                                <label className="text-sm font-bold text-zinc-700 mb-1.5 flex items-center gap-1">
+                                                <label className="text-sm font-bold text-zinc-700 dark:text-zinc-300 mb-1.5 flex items-center gap-1">
                                                   {task.screenshot_instruction || 'Upload Screenshot'}
                                                   <span className="text-red-500 ml-0.5">*</span>
                                                   <span className="text-[10px] font-medium text-zinc-400 ml-1">(Required)</span>
@@ -1711,17 +1749,26 @@ export function TasksView({
                                                     </div>
 
                                                     {/* Submit Action Button */}
-                                                    <Button
-                                                      onClick={() => submitTask(task.id)}
-                                                      disabled={uploading === task.id || !selectedFiles[task.id] || !customFieldValue.trim()}
-                                                      variant={selectedFiles[task.id] && customFieldValue.trim() ? 'primary' : 'secondary'}
-                                                      className={cn(
-                                                        'w-full h-12 font-black uppercase tracking-wider text-sm flex items-center justify-center gap-2 rounded-xl shadow-xs transition-all cursor-pointer',
-                                                        selectedFiles[task.id] && customFieldValue.trim() ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'opacity-50 cursor-not-allowed'
-                                                      )}
-                                                    >
-                                                      {uploading === task.id ? <Loader2 size={20} className="animate-spin" /> : <><CheckCircle2 size={18} /> Confirm & Submit Academic Proof</>}
-                                                    </Button>
+                                                    {(() => {
+                                                      const hasCustomField = Boolean(task.custom_field_label && task.custom_field_label.trim());
+                                                      const isCustomFieldValid = hasCustomField ? Boolean((customFieldValues[task.id] || '').trim()) : true;
+                                                      const hasFile = Boolean(selectedFiles[task.id]);
+                                                      const isReadyToSubmit = hasFile && isCustomFieldValid && uploading !== task.id;
+
+                                                      return (
+                                                        <Button
+                                                          onClick={() => submitTask(task.id)}
+                                                          disabled={!isReadyToSubmit}
+                                                          variant={isReadyToSubmit ? 'primary' : 'secondary'}
+                                                          className={cn(
+                                                            'w-full h-12 font-black uppercase tracking-wider text-sm flex items-center justify-center gap-2 rounded-xl shadow-xs transition-all cursor-pointer',
+                                                            isReadyToSubmit ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'opacity-50 cursor-not-allowed'
+                                                          )}
+                                                        >
+                                                          {uploading === task.id ? <Loader2 size={20} className="animate-spin" /> : <><CheckCircle2 size={18} /> Confirm & Submit Academic Proof</>}
+                                                        </Button>
+                                                      );
+                                                    })()}
                                                   </div>
                                                   <div className="flex items-start gap-2 text-zinc-400">
                                                     <span className="text-xs shrink-0 mt-0.5">*</span>
